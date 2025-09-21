@@ -1,0 +1,14 @@
+node_modules/
+chroma_storage/
+server/chroma_storage/
+server/scripts/chroma_storage/
+temp/
+uploads/
+attached_assets/
+package-lock.json
+uv.lock
+*.log
+.env
+build/
+dist/
+.next/

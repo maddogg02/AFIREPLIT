@@ -23,7 +23,6 @@ export default function Upload() {
   const [selectedFolder, setSelectedFolder] = useState("");
   const [newFolderName, setNewFolderName] = useState("");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [afiNumber, setAfiNumber] = useState("");
   const [processingProgress, setProcessingProgress] = useState(0);
   const [processingMessage, setProcessingMessage] = useState("");
   const [documentId, setDocumentId] = useState<string | null>(null);
@@ -53,11 +52,10 @@ export default function Upload() {
 
   // Upload document mutation
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, folderId, afiNumber }: { file: File; folderId: string; afiNumber: string }) => {
+    mutationFn: async ({ file, folderId }: { file: File; folderId: string }) => {
       const formData = new FormData();
       formData.append("pdf", file);
       formData.append("folderId", folderId);
-      formData.append("afiNumber", afiNumber);
 
       const response = await fetch("/api/documents/upload", {
         method: "POST",
@@ -152,7 +150,7 @@ export default function Upload() {
   // Removed TOC confirmation - direct processing
 
   const handleStartProcessing = () => {
-    if (!uploadedFile || !selectedFolder || !afiNumber) {
+    if (!uploadedFile || !selectedFolder) {
       toast({
         title: "Missing information",
         description: "Please complete all required fields",
@@ -164,7 +162,6 @@ export default function Upload() {
     uploadMutation.mutate({
       file: uploadedFile,
       folderId: selectedFolder,
-      afiNumber,
     });
   };
 
@@ -232,16 +229,6 @@ export default function Upload() {
                 </Button>
               </div>
             </div>
-          </div>
-          
-          <div className="space-y-2">
-            <Label htmlFor="afi-number">AFI Number</Label>
-            <Input
-              placeholder="e.g., AFI 21-101"
-              value={afiNumber}
-              onChange={(e) => setAfiNumber(e.target.value)}
-              data-testid="afi-number-input"
-            />
           </div>
         </CardContent>
       </Card>
@@ -315,9 +302,9 @@ export default function Upload() {
                 <h4 className="font-medium mb-2">Processing Summary</h4>
                 <div className="space-y-1 text-sm">
                   <p><strong>File:</strong> {uploadedFile?.name}</p>
-                  <p><strong>AFI Number:</strong> {afiNumber}</p>
                   <p><strong>Folder:</strong> {folders.find(f => f.id === selectedFolder)?.name}</p>
                   <p><strong>Processing:</strong> PDF → Python Parser → CSV → Embeddings → Replit DB</p>
+                  <p className="text-xs text-muted-foreground">AFI number will be automatically extracted from the document</p>
                 </div>
               </div>
 
@@ -329,7 +316,7 @@ export default function Upload() {
                   </div>
                   <Progress value={processingProgress} className="w-full" />
                   <p className="text-xs text-muted-foreground">
-                    Real-time BGE embedding progress - {processingProgress < 50 ? "Parsing PDF..." : processingProgress < 90 ? "Generating embeddings..." : "Finalizing..."}
+                    Real-time OpenAI embedding progress - {processingProgress < 50 ? "Parsing PDF..." : processingProgress < 90 ? "Generating embeddings..." : "Finalizing..."}
                   </p>
                 </div>
               )}
@@ -337,7 +324,7 @@ export default function Upload() {
               <Button
                 className="w-full"
                 onClick={handleStartProcessing}
-                disabled={!selectedFolder || !afiNumber || !uploadedFile || uploadMutation.isPending || (processingProgress > 0 && processingProgress < 100)}
+                disabled={!selectedFolder || !uploadedFile || uploadMutation.isPending || (processingProgress > 0 && processingProgress < 100)}
                 data-testid="start-processing-button"
               >
                 {uploadMutation.isPending || (processingProgress > 0 && processingProgress < 100) ? 
@@ -356,7 +343,7 @@ export default function Upload() {
                   </p>
                   <p className="flex items-center justify-center gap-2">
                     {processingProgress >= 90 ? "✓" : processingProgress >= 50 ? "⏳" : "○"} 
-                    Generating BGE embeddings: {processingProgress >= 50 ? `${Math.round((processingProgress - 50) / 40 * 100)}% complete` : "Waiting..."}
+                    Generating OpenAI embeddings: {processingProgress >= 50 ? `${Math.round((processingProgress - 50) / 40 * 100)}% complete` : "Waiting..."}
                   </p>
                   <p className="flex items-center justify-center gap-2">
                     {processingProgress >= 95 ? "✓" : processingProgress >= 90 ? "⏳" : "○"} 

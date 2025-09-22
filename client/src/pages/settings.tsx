@@ -19,7 +19,7 @@ export default function Settings() {
   const [vectorDimension] = useState("384");
   const [chunkSize] = useState("300");
   const [chunkOverlap] = useState("200");
-  const [embeddingModel] = useState("BAAI/bge-small-en-v1.5");
+  const [embeddingModel] = useState("text-embedding-3-small");
 
   // Fetch folders
   const { data: folders = [] } = useQuery<Folder[]>({
@@ -140,7 +140,7 @@ export default function Settings() {
             Processing Configuration
           </CardTitle>
           <CardDescription>
-            Current PDF processing and BGE embedding configuration
+            Current PDF processing and OpenAI embedding configuration
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -172,7 +172,7 @@ export default function Settings() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="BAAI/bge-small-en-v1.5">BAAI/bge-small-en-v1.5</SelectItem>
+                  <SelectItem value="text-embedding-3-small">text-embedding-3-small</SelectItem>
                 </SelectContent>
               </Select>
             </div>

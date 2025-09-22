@@ -6,8 +6,9 @@ import multer from "multer";
 import path from "path";
 import fs from "fs";
 import { PDFProcessor } from "./utils/pdf_processor";
-import { ChromaDBSearchService } from "./utils/chromadb_search";
 import { OpenAIService } from "./utils/openai_service";
+import { SemanticSearchService } from "./utils/semantic_search";
+import { RAGChatService } from "./utils/rag_chat";
 
 // Configure multer for file uploads
 const upload = multer({
@@ -88,15 +89,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "No file uploaded" });
       }
 
-      const { folderId, afiNumber } = req.body;
-      if (!folderId || !afiNumber) {
-        return res.status(400).json({ error: "folderId and afiNumber are required" });
+      const { folderId } = req.body;
+      if (!folderId) {
+        return res.status(400).json({ error: "folderId is required" });
       }
 
       const documentData = {
         folderId,
         filename: req.file.originalname,
-        afiNumber,
+        afiNumber: "EXTRACTING", // Will be updated after Python processing
         fileSize: req.file.size,
         status: "processing" as const,
       };
@@ -150,7 +151,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } else if (progress < 50) {
         message = `Parsing PDF and extracting paragraphs... ${progress}%`;
       } else if (progress < 90) {
-        message = `Generating BGE embeddings... ${Math.round((progress - 50) / 40 * 100)}% complete`;
+        message = `Generating OpenAI embeddings... ${Math.round((progress - 50) / 40 * 100)}% complete`;
       } else if (progress < 100) {
         message = "Finalizing and storing in ChromaDB...";
       } else {
@@ -167,42 +168,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching document status:", error);
       res.status(500).json({ error: "Failed to fetch document status" });
-    }
-  });
-
-  // Semantic search using global ChromaDB collection with metadata filtering
-  app.get("/api/search", async (req, res) => {
-    try {
-      const { q, folderId, afiNumber, category, topK } = req.query;
-      if (!q) {
-        return res.status(400).json({ error: "Query parameter 'q' is required" });
-      }
-
-      const results = await ChromaDBSearchService.semanticSearch(
-        q as string,
-        {
-          topK: topK ? parseInt(topK as string) : 5,
-          folderId: folderId as string,
-          afiNumber: afiNumber as string,
-          category: category as string
-        }
-      );
-      
-      res.json(results);
-    } catch (error) {
-      console.error("Error performing ChromaDB search:", error);
-      res.status(500).json({ error: "Failed to perform semantic search" });
-    }
-  });
-
-  // Get ChromaDB embedding statistics
-  app.get("/api/embeddings/stats", async (req, res) => {
-    try {
-      const stats = await ChromaDBSearchService.getStats();
-      res.json(stats);
-    } catch (error) {
-      console.error("Error fetching ChromaDB stats:", error);
-      res.status(500).json({ error: "Failed to fetch stats" });
     }
   });
 
@@ -256,55 +221,55 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Get session context for search scope
           const session = await storage.getChatSession(sessionId);
           
-          // Perform semantic search with global ChromaDB collection
-          const searchResults = await ChromaDBSearchService.semanticSearch(
-            content,
-            {
-              topK: 3,
-              folderId: session?.scopeFolder === "all" ? undefined : session?.scopeFolder,
-              afiNumber: session?.scopeAfi === "all" ? undefined : session?.scopeAfi
-            }
-          );
-          
-          // Generate AI response using OpenAI RAG
-          let aiResponse: string;
-          let sources: Array<{
-            afiNumber: string;
-            chapter: string;
-            section: string;
-            paragraph: string;
-            text: string;
-            score: number;
-          }> = [];
-          
-          if (searchResults.length > 0) {
-            // Extract sources for citation tracking
-            sources = searchResults.map(result => ({
-              afiNumber: result.metadata.afi_number,
-              chapter: result.metadata.chapter,
-              section: result.metadata.section || '',
-              paragraph: result.metadata.paragraphs[0] || '',
-              text: result.text,
-              score: result.score
-            }));
-            
-            // Generate intelligent response using OpenAI RAG
-            aiResponse = await OpenAIService.generateRAGResponse(content, searchResults);
-          } else {
-            aiResponse = "I couldn't find specific information related to your question in the available AFI documentation. Please try rephrasing your question or check if the relevant documents have been uploaded and processed.";
+          // Get folder name if scope is set
+          let folderName: string | undefined;
+          if (session?.scopeFolder && session.scopeFolder !== "all") {
+            const folder = await storage.getFolder(session.scopeFolder);
+            folderName = folder?.name;
           }
           
-          // Save AI response
+          console.log(`🤖 Generating RAG response for: "${content}"`);
+          
+          // Use RAG system to generate response
+          const ragResponse = await RAGChatService.askQuestion(content, {
+            afi_number: session?.scopeAfi === "all" ? undefined : session?.scopeAfi,
+            folder: folderName,
+            n_results: 5
+          });
+          
+          let aiResponseContent: string;
+          let sources: any = null;
+          
+          if (ragResponse.success) {
+            aiResponseContent = ragResponse.answer || "I couldn't generate a proper response.";
+            
+            // Format sources for storage
+            if (ragResponse.sources && ragResponse.sources.length > 0) {
+              sources = ragResponse.sources.map(source => ({
+                reference: source.reference,
+                afi_number: source.afi_number,
+                chapter: source.chapter,
+                paragraph: source.paragraph,
+                similarity_score: source.similarity_score,
+                text_preview: source.text_preview
+              }));
+            }
+          } else {
+            aiResponseContent = `I encountered an issue searching the AFI database: ${ragResponse.error}. Please try rephrasing your question.`;
+          }
+          
+          // Save AI response with sources
           const aiMessage = await storage.createChatMessage({
             sessionId,
             role: "assistant",
-            content: aiResponse,
-            sources: sources.length > 0 ? sources : null
+            content: aiResponseContent,
+            sources: sources
           });
           
+          console.log(`✅ RAG response generated with ${ragResponse.sources?.length || 0} sources`);
           res.status(201).json({ userMessage, aiMessage });
         } catch (searchError) {
-          console.error("Error generating AI response:", searchError);
+          console.error("Error generating RAG response:", searchError);
           
           // Save fallback AI response
           const fallbackMessage = await storage.createChatMessage({
@@ -325,40 +290,90 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Semantic Search API Endpoints
+  
+  // Search documents using semantic similarity
+  app.post("/api/search", async (req, res) => {
+    try {
+      const { query, n_results = 5, filters } = req.body;
+      
+      if (!query || typeof query !== 'string') {
+        return res.status(400).json({ error: "Query is required and must be a string" });
+      }
+
+      const searchResults = await SemanticSearchService.searchDocuments(
+        query, 
+        n_results, 
+        filters
+      );
+
+      res.json(searchResults);
+    } catch (error: any) {
+      console.error("Search error:", error);
+      res.status(500).json({ 
+        success: false,
+        error: "Internal search error",
+        query: req.body.query || null,
+        total_matches: 0,
+        results: []
+      });
+    }
+  });
+
+  // Get ChromaDB collection statistics
+  app.get("/api/search/stats", async (req, res) => {
+    try {
+      const stats = await SemanticSearchService.getCollectionStats();
+      res.json(stats);
+    } catch (error: any) {
+      console.error("Stats error:", error);
+      res.status(500).json({ error: "Failed to get collection statistics" });
+    }
+  });
+
+  // Serve search demo page
+  app.get("/search-demo", (req, res) => {
+    res.sendFile(path.join(process.cwd(), "search-demo.html"));
+  });
+
   const httpServer = createServer(app);
 
   return httpServer;
 }
 
-// Real PDF processing using Python scripts and Replit DB
+// Complete RAG pipeline processing
 async function processPDFAsync(filePath: string, documentId: string) {
   try {
-    console.log(`Starting real PDF processing for document ${documentId}`);
+    console.log(`Starting RAG pipeline for document ${documentId}`);
     
-    // Process PDF with real Python script
-    const result = await PDFProcessor.processPDF(
+    // Process PDF through complete RAG pipeline: PDF → CSV → OpenAI Embeddings → ChromaDB
+    const result = await PDFProcessor.processPDFToRAG(
       filePath, 
       documentId,
-      async (progress, message) => {
+      async (progress: number, message?: string) => {
         console.log(`Progress: ${progress}% - ${message}`);
         await storage.updateDocument(documentId, { 
           processingProgress: progress,
-          status: progress < 100 ? "processing" : "embedding"
+          status: progress < 100 ? "processing" : "complete"
         });
       }
     );
 
     if (result.success) {
-      // Update document with final status - ChromaDB stores directly
+      // Update document with final status and extracted AFI number - RAG pipeline complete
       await storage.updateDocument(documentId, {
         status: "complete",
-        totalChunks: result.chunkCount || 0,
+        afiNumber: result.afiNumber || "UNKNOWN", // Update with extracted AFI number
+        totalChunks: result.embeddingCount || result.recordCount || 0,
         processingProgress: 100
       });
       
-      console.log(`Successfully processed ${result.afiNumber}: ${result.chunkCount} embeddings created in ChromaDB collection ${result.collectionName}`);
+      console.log(`✅ RAG pipeline complete for ${result.afiNumber}:`);
+      console.log(`  📄 ${result.recordCount} paragraphs extracted`);
+      console.log(`  🧠 ${result.embeddingCount} OpenAI embeddings created`);
+      console.log(`  🗃️ Stored in ChromaDB collection: ${result.collectionName}`);
     } else {
-      throw new Error(`PDF processing failed: ${result.error}`);
+      throw new Error(`RAG pipeline failed: ${result.error}`);
     }
 
     // Clean up temporary files

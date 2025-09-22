@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AFI Semantic Search Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #1e40af;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .search-box {
+            margin-bottom: 30px;
+        }
+        input[type="text"] {
+            width: 70%;
+            padding: 12px;
+            font-size: 16px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            margin-right: 10px;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            background-color: #1e40af;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #1e3a8a;
+        }
+        button:disabled {
+            background-color: #9ca3af;
+            cursor: not-allowed;
+        }
+        .loading {
+            text-align: center;
+            color: #6b7280;
+            font-style: italic;
+        }
+        .results {
+            margin-top: 20px;
+        }
+        .result-item {
+            background-color: #f8fafc;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 15px;
+        }
+        .result-header {
+            display: flex;
+            justify-content: between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .paragraph-info {
+            font-weight: bold;
+            color: #1e40af;
+        }
+        .similarity-score {
+            background-color: #10b981;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            margin-left: auto;
+        }
+        .metadata {
+            font-size: 14px;
+            color: #6b7280;
+            margin-bottom: 10px;
+        }
+        .result-text {
+            font-size: 16px;
+            line-height: 1.5;
+            color: #374151;
+        }
+        .stats {
+            background-color: #eff6ff;
+            border: 1px solid #dbeafe;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .stats h3 {
+            margin-top: 0;
+            color: #1e40af;
+        }
+        .error {
+            background-color: #fef2f2;
+            border: 1px solid #fecaca;
+            color: #dc2626;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 AFI Semantic Search Demo</h1>
+        
+        <div class="search-box">
+            <input type="text" id="searchQuery" placeholder="Search AFI documents (e.g., 'maintenance procedures', 'uniform standards', 'safety requirements')" />
+            <button onclick="performSearch()" id="searchBtn">Search</button>
+        </div>
+
+        <div id="stats"></div>
+        <div id="loading" class="loading" style="display: none;">Searching AFI documents...</div>
+        <div id="results" class="results"></div>
+    </div>
+
+    <script>
+        // Load collection stats on page load
+        window.addEventListener('load', loadStats);
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/search/stats');
+                const stats = await response.json();
+                
+                if (stats.success !== false) {
+                    document.getElementById('stats').innerHTML = `
+                        <div class="stats">
+                            <h3>📊 Collection Statistics</h3>
+                            <p><strong>Total Documents:</strong> ${stats.total_documents || 'N/A'}</p>
+                            <p><strong>Collection:</strong> ${stats.collection_name || 'N/A'}</p>
+                            <p><strong>Embedding Dimension:</strong> ${stats.embedding_dimension || 'N/A'}</p>
+                            <p><strong>Available Metadata:</strong> ${(stats.sample_metadata_keys || []).join(', ')}</p>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+            }
+        }
+
+        async function performSearch() {
+            const query = document.getElementById('searchQuery').value.trim();
+            if (!query) {
+                alert('Please enter a search query');
+                return;
+            }
+
+            const searchBtn = document.getElementById('searchBtn');
+            const loading = document.getElementById('loading');
+            const results = document.getElementById('results');
+
+            // Show loading state
+            searchBtn.disabled = true;
+            loading.style.display = 'block';
+            results.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        n_results: 5
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayResults(data);
+                } else {
+                    showError(data.error || 'Search failed');
+                }
+            } catch (error) {
+                showError('Network error: ' + error.message);
+            } finally {
+                searchBtn.disabled = false;
+                loading.style.display = 'none';
+            }
+        }
+
+        function displayResults(data) {
+            const results = document.getElementById('results');
+            
+            if (data.total_matches === 0) {
+                results.innerHTML = `
+                    <div class="error">
+                        No matches found for "${data.query}". Try different keywords or more general terms.
+                    </div>
+                `;
+                return;
+            }
+
+            let html = `<h2>🎯 Found ${data.total_matches} matches for "${data.query}"</h2>`;
+            
+            data.results.forEach((result, index) => {
+                html += `
+                    <div class="result-item">
+                        <div class="result-header">
+                            <span class="paragraph-info">📄 ${result.metadata.afi_number || 'Unknown AFI'} - §${result.metadata.paragraph || 'Unknown'}</span>
+                            <span class="similarity-score">${(result.similarity_score * 100).toFixed(1)}% match</span>
+                        </div>
+                        <div class="metadata">
+                            <strong>Chapter:</strong> ${result.metadata.chapter || 'N/A'} | 
+                            <strong>Page:</strong> ${result.metadata.page_number || 'N/A'} | 
+                            <strong>Category:</strong> ${result.metadata.category || 'N/A'}
+                            ${result.metadata.compliance_tier && result.metadata.compliance_tier !== 'nan' ? ` | <strong>Tier:</strong> ${result.metadata.compliance_tier}` : ''}
+                        </div>
+                        <div class="result-text">${result.text}</div>
+                    </div>
+                `;
+            });
+
+            results.innerHTML = html;
+        }
+
+        function showError(message) {
+            const results = document.getElementById('results');
+            results.innerHTML = `
+                <div class="error">
+                    <strong>Error:</strong> ${message}
+                </div>
+            `;
+        }
+
+        // Allow Enter key to trigger search
+        document.getElementById('searchQuery').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                performSearch();
+            }
+        });
+    </script>
+</body>
+</html>

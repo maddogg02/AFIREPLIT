@@ -1,5 +1,23 @@
 import OpenAI from "openai";
-import { type SearchResult } from "./chromadb_search.js";
+
+// Define SearchResult interface locally since we removed chromadb_search
+interface SearchResult {
+  score: number;
+  text: string;
+  metadata: {
+    doc_id: string;
+    folder: string;
+    afi_number: string;
+    chapter: string;
+    section?: string;
+    paragraphs: string[];
+    section_path: string;
+    page_numbers: number[];
+    categories: string[];
+    compliance_tiers: string[];
+    chunk_size: number;
+  };
+}
 
 const openai = new OpenAI({ 
   apiKey: process.env.OPENAI_API_KEY 

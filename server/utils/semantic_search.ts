@@ -1,190 +1,184 @@
-import crypto from "crypto";
+import { spawn } from "child_process";
+import path from "path";
 
 export interface SearchResult {
-  score: number;
+  id: string;
   text: string;
   metadata: {
-    doc_id: string;
-    folder: string;
-    afi_number: string;
-    chapter: string;
-    section?: string;
-    paragraphs: string[];
-    section_path: string;
-    page_numbers: number[];
-    categories: string[];
-    compliance_tiers: string[];
-    chunk_size: number;
+    paragraph?: string;
+    afi_number?: string;
+    chapter?: string;
+    doc_id?: string;
+    compliance_tier?: string;
   };
+  similarity_score: number;
+}
+
+export interface SearchResponse {
+  success: boolean;
+  query: string;
+  total_matches: number;
+  results: SearchResult[];
+  error?: string;
+}
+
+export interface SearchFilters {
+  doc_id?: string;
+  afi_number?: string;
+  min_score?: number;
 }
 
 export class SemanticSearchService {
-  private static db: any = null;
-
-  static async initializeDB() {
-    if (!this.db) {
-      const Database = (await import("@replit/database")).default;
-      this.db = new Database();
-    }
-    return this.db;
-  }
+  private static readonly SCRIPTS_DIR = path.join(process.cwd(), "server", "scripts");
+  private static readonly CHROMA_DIR = path.join(process.cwd(), "chroma_storage_openai");
 
   /**
-   * Create a simple embedding for the query
-   * This is a mock implementation - in production you'd use sentence-transformers
+   * Search the ChromaDB collection for semantically similar content
    */
-  private static createQueryEmbedding(query: string): number[] {
-    // Simple hash-based embedding for consistent results
-    const hash = crypto.createHash("md5").update(query).digest("hex");
-    
-    const embedding = [];
-    for (let i = 0; i < hash.length; i += 2) {
-      const hexPair = hash.substring(i, i + 2);
-      const val = parseInt(hexPair, 16) / 128.0 - 1.0;
-      embedding.push(val);
-    }
-    
-    // Pad to 384 dimensions to match our mock embeddings
-    while (embedding.length < 384) {
-      embedding.push(...embedding.slice(0, Math.min(embedding.length, 384 - embedding.length)));
-    }
-    
-    return embedding.slice(0, 384);
-  }
-
-  /**
-   * Calculate cosine similarity between two vectors
-   */
-  private static cosineSimilarity(a: number[], b: number[]): number {
-    if (a.length !== b.length) {
-      throw new Error("Vectors must have the same length");
-    }
-    
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    
-    for (let i = 0; i < a.length; i++) {
-      dotProduct += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-    
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-  }
-
-  /**
-   * Perform semantic search across all embeddings
-   */
-  static async semanticSearch(
+  static async searchDocuments(
     query: string,
-    options: {
-      topK?: number;
-      folderId?: string;
-      afiNumber?: string;
-      minScore?: number;
-    } = {}
-  ): Promise<SearchResult[]> {
-    const { topK = 5, folderId, afiNumber, minScore = 0.1 } = options;
+    n_results: number = 5,
+    filters?: SearchFilters
+  ): Promise<SearchResponse> {
+    return new Promise((resolve) => {
+      const scriptPath = path.join(this.SCRIPTS_DIR, "search_chromadb_openai.py");
+      
+      // Build command arguments
+      const args = [
+        scriptPath,
+        "--query", query,
+        "--n_results", n_results.toString(),
+        "--chroma_dir", this.CHROMA_DIR
+      ];
 
-    try {
-      const db = await this.initializeDB();
-      
-      // Get query embedding
-      const queryEmbedding = this.createQueryEmbedding(query);
-      
-      // Get all keys from Replit DB with embedding prefix
-      const keys = await db.list("embedding:");
-      const results: SearchResult[] = [];
-      
-      console.log(`Searching through ${keys.length} embeddings for: "${query}"`);
-      
-      for (const key of keys) {
-        try {
-          const record = await db.get(key);
-          if (!record) continue;
-          
-          // Handle if record is already an object vs string
-          const embedding_record = typeof record === 'string' ? JSON.parse(record) : record;
-          if (!embedding_record.embedding || !embedding_record.metadata) continue;
-          
-          // Apply filters
-          if (folderId && embedding_record.metadata.folder !== folderId) continue;
-          if (afiNumber && embedding_record.metadata.afi_number !== afiNumber) continue;
-          
-          // Calculate similarity
-          const score = this.cosineSimilarity(queryEmbedding, embedding_record.embedding);
-          
-          if (score >= minScore) {
-            results.push({
-              score,
-              text: embedding_record.text,
-              metadata: embedding_record.metadata
+      // Add optional filters
+      if (filters?.doc_id) {
+        args.push("--filter_doc_id", filters.doc_id);
+      }
+      if (filters?.afi_number) {
+        args.push("--filter_afi_number", filters.afi_number);
+      }
+      if (filters?.min_score !== undefined) {
+        args.push("--min_score", filters.min_score.toString());
+      }
+
+      const pythonProcess = spawn("python3", args, {
+        env: { 
+          ...process.env, 
+          PYTHONIOENCODING: 'utf-8',
+          HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+        }
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      pythonProcess.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+
+      pythonProcess.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      pythonProcess.on("close", (code) => {
+        if (code === 0) {
+          try {
+            // Extract JSON output from stdout
+            const jsonMatch = stdout.match(/JSON_OUTPUT: (.+)$/m);
+            if (jsonMatch) {
+              const result = JSON.parse(jsonMatch[1]) as SearchResponse;
+              resolve(result);
+            } else {
+              resolve({
+                success: false,
+                query,
+                total_matches: 0,
+                results: [],
+                error: "No JSON output found in search results"
+              });
+            }
+          } catch (parseError) {
+            resolve({
+              success: false,
+              query,
+              total_matches: 0,
+              results: [],
+              error: `Failed to parse search results: ${parseError}`
             });
           }
-        } catch (error) {
-          console.warn(`Error processing record ${key}:`, error);
-          continue;
+        } else {
+          resolve({
+            success: false,
+            query,
+            total_matches: 0,
+            results: [],
+            error: `Search script failed with code ${code}: ${stderr}`
+          });
         }
-      }
-      
-      // Sort by score (highest first) and return top K
-      results.sort((a, b) => b.score - a.score);
-      
-      console.log(`Found ${results.length} relevant results, returning top ${topK}`);
-      
-      return results.slice(0, topK);
-      
-    } catch (error: any) {
-      console.error("Semantic search error:", error);
-      throw new Error(`Search failed: ${error.message}`);
-    }
+      });
+
+      pythonProcess.on("error", (error) => {
+        resolve({
+          success: false,
+          query,
+          total_matches: 0,
+          results: [],
+          error: `Failed to start search process: ${error.message}`
+        });
+      });
+    });
   }
 
   /**
-   * Get embedding count and statistics
+   * Get collection statistics
    */
-  static async getStats(): Promise<{
-    totalEmbeddings: number;
-    byFolder: Record<string, number>;
-    byAFI: Record<string, number>;
-  }> {
-    try {
-      const db = await this.initializeDB();
-      const keys = await db.list("embedding:");
+  static async getCollectionStats(): Promise<any> {
+    return new Promise((resolve) => {
+      const scriptPath = path.join(this.SCRIPTS_DIR, "search_chromadb_openai.py");
       
-      const stats = {
-        totalEmbeddings: 0,
-        byFolder: {} as Record<string, number>,
-        byAFI: {} as Record<string, number>
-      };
-      
-      for (const key of keys) {
-        try {
-          const record = await db.get(key);
-          if (!record) continue;
-          
-          const embedding_record = typeof record === 'string' ? JSON.parse(record) : record;
-          if (!embedding_record.metadata) continue;
-          
-          stats.totalEmbeddings++;
-          
-          const folder = embedding_record.metadata.folder || "Unknown";
-          const afi = embedding_record.metadata.afi_number || "Unknown";
-          
-          stats.byFolder[folder] = (stats.byFolder[folder] || 0) + 1;
-          stats.byAFI[afi] = (stats.byAFI[afi] || 0) + 1;
-          
-        } catch (error) {
-          continue;
+      const pythonProcess = spawn("python3", [
+        scriptPath,
+        "--query", "test",  // Dummy query
+        "--stats",
+        "--chroma_dir", this.CHROMA_DIR
+      ], {
+        env: { 
+          ...process.env, 
+          PYTHONIOENCODING: 'utf-8',
+          HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
         }
-      }
-      
-      return stats;
-      
-    } catch (error: any) {
-      console.error("Stats error:", error);
-      throw new Error(`Failed to get stats: ${error.message}`);
-    }
+      });
+
+      let stdout = "";
+      let stderr = "";
+
+      pythonProcess.stdout.on("data", (data) => {
+        stdout += data.toString();
+      });
+
+      pythonProcess.stderr.on("data", (data) => {
+        stderr += data.toString();
+      });
+
+      pythonProcess.on("close", (code) => {
+        if (code === 0) {
+          try {
+            // Extract JSON output from stdout
+            const jsonMatch = stdout.match(/JSON_OUTPUT: (.+)$/m);
+            if (jsonMatch) {
+              const result = JSON.parse(jsonMatch[1]);
+              resolve(result);
+            } else {
+              resolve({ error: "No JSON output found" });
+            }
+          } catch (parseError) {
+            resolve({ error: `Failed to parse stats: ${parseError}` });
+          }
+        } else {
+          resolve({ error: `Stats script failed: ${stderr}` });
+        }
+      });
+    });
   }
 }

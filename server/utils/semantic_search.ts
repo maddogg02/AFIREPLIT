@@ -60,9 +60,12 @@ export class SemanticSearchService {
       }
       if (filters?.min_score !== undefined) {
         args.push("--min_score", filters.min_score.toString());
+      } else {
+        // Default to 0.05 minimum score to match RAG system for better results
+        args.push("--min_score", "0.05");
       }
 
-      const pythonProcess = spawn("python3", args, {
+      const pythonProcess = spawn("python", args, {
         env: { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
@@ -137,7 +140,7 @@ export class SemanticSearchService {
     return new Promise((resolve) => {
       const scriptPath = path.join(this.SCRIPTS_DIR, "search_chromadb_openai.py");
       
-      const pythonProcess = spawn("python3", [
+      const pythonProcess = spawn("python", [
         scriptPath,
         "--query", "test",  // Dummy query
         "--stats",

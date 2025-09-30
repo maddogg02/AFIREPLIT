@@ -31,6 +31,7 @@ export interface RAGFilters {
   chapter?: string;
   folder?: string;
   n_results?: number;
+  model?: string;
 }
 
 export class RAGChatService {
@@ -72,11 +73,23 @@ export class RAGChatService {
         args.push("--folder", filters.folder);
       }
       
+      if (filters?.model) {
+        args.push("--model", filters.model);
+      }
+      
       console.log(`🤖 RAG Chat: Asking "${query}"`);
+      
+      // Ensure OPENAI_API_KEY is available
+      if (!process.env.OPENAI_API_KEY) {
+        console.error("❌ OPENAI_API_KEY not found in environment");
+      } else {
+        console.log("✅ OPENAI_API_KEY found in environment");
+      }
       
       const pythonProcess = spawn("python", args, {
         env: { 
           ...process.env, 
+          OPENAI_API_KEY: process.env.OPENAI_API_KEY, // Explicitly pass the API key
           PYTHONIOENCODING: 'utf-8',
           HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
         }
@@ -95,6 +108,10 @@ export class RAGChatService {
       });
 
       pythonProcess.on("close", (code) => {
+        console.log(`🐍 Python process completed with code: ${code}`);
+        console.log(`🐍 Python STDOUT: "${stdout.trim()}"`);
+        console.log(`🐍 Python STDERR: "${stderr.trim()}"`);
+        
         if (code === 0) {
           try {
             // Parse JSON response
@@ -103,6 +120,7 @@ export class RAGChatService {
             resolve(result);
           } catch (parseError) {
             console.error("Failed to parse RAG response:", parseError);
+            console.error(`Raw output that failed to parse: "${stdout.trim()}"`);
             resolve({
               success: false,
               query,

@@ -91,6 +91,30 @@ class CSVToChromaDBOpenAI:
         
         return embeddings
     
+    def remove_existing_afi_documents(self, afi_number: str):
+        """Remove existing documents with the same AFI number"""
+        try:
+            # Get all documents with this AFI number
+            existing_docs = self.collection.get(
+                where={"afi_number": afi_number}
+            )
+            
+            if existing_docs['ids']:
+                print(f"Found {len(existing_docs['ids'])} existing documents for {afi_number}")
+                print(f"Removing existing {afi_number} documents to replace with new version...")
+                
+                # Delete existing documents
+                self.collection.delete(
+                    ids=existing_docs['ids']
+                )
+                print(f"[SUCCESS] Removed {len(existing_docs['ids'])} existing documents for {afi_number}")
+            else:
+                print(f"No existing documents found for {afi_number} - this is a new AFI")
+                
+        except Exception as e:
+            print(f"[WARNING] Error checking for existing documents: {str(e)}")
+            # Continue with processing even if removal fails
+
     def process_csv_to_embeddings(self, csv_path: str, doc_id: str) -> Dict[str, Any]:
         """Process CSV file and create OpenAI embeddings for each row"""
         print(f"Reading CSV: {csv_path}")
@@ -101,6 +125,13 @@ class CSVToChromaDBOpenAI:
             
             if len(df) == 0:
                 return {"success": False, "error": "CSV file is empty"}
+            
+            # Get AFI number from first row to check for existing documents
+            afi_number = str(df.iloc[0].get('afi_number', 'UNKNOWN'))
+            print(f"Processing AFI: {afi_number}")
+            
+            # Remove existing documents with the same AFI number (replace functionality)
+            self.remove_existing_afi_documents(afi_number)
             
             # Prepare texts for embedding
             texts = df['text'].astype(str).tolist()
@@ -164,11 +195,13 @@ class CSVToChromaDBOpenAI:
             collection_count = self.collection.count()
             
             print(f"[SUCCESS] OpenAI embeddings stored in ChromaDB collection")
+            print(f"AFI {afi_number}: {len(valid_indices)} documents processed")
             print(f"Total documents in collection: {collection_count}")
             
             return {
                 "success": True,
                 "processed_rows": len(valid_indices),
+                "afi_number": afi_number,
                 "collection_name": self.collection_name,
                 "total_in_collection": collection_count,
                 "embedding_model": "text-embedding-3-small",

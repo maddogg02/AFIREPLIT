@@ -41,7 +41,7 @@ export default function SourceReference({ sources }: SourceReferenceProps) {
               </Badge>
               {source.similarity_score && (
                 <span className="text-xs text-muted-foreground">
-                  {Math.round(source.similarity_score * 100)}% match
+                  {(source.similarity_score * 100).toFixed(1)}% match
                 </span>
               )}
             </div>

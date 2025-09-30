@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Search, MessageCircle, Send, Mic, Plus } from "lucide-react";
+import { Search, MessageCircle, Send, Mic, Plus, Cpu } from "lucide-react";
 import Message from "@/components/chat/message";
 import { apiRequest } from "@/lib/queryClient";
 import { type Folder, type ChatSession, type ChatMessage, type Document } from "@shared/schema";
@@ -19,6 +19,7 @@ export default function Chat() {
   const [scopeAfi, setScopeAfi] = useState("all");
   const [messageInput, setMessageInput] = useState("");
   const [currentSession, setCurrentSession] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState("gpt-5");
 
   // Fetch folders
   const { data: folders = [] } = useQuery<Folder[]>({
@@ -59,11 +60,12 @@ export default function Chat() {
 
   // Send message mutation
   const sendMessageMutation = useMutation({
-    mutationFn: async ({ sessionId, content }: { sessionId: string; content: string }) => {
+    mutationFn: async ({ sessionId, content, model }: { sessionId: string; content: string; model: string }) => {
       // Send user message - backend automatically generates ChromaDB-powered AI response
       const response = await apiRequest("POST", `/api/chat/sessions/${sessionId}/messages`, {
         role: "user",
         content,
+        model,
       });
       return response.json();
     },
@@ -92,6 +94,7 @@ export default function Chat() {
     sendMessageMutation.mutate({
       sessionId: currentSession,
       content: messageInput.trim(),
+      model: selectedModel,
     });
   };
 
@@ -116,7 +119,7 @@ export default function Chat() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="space-y-2">
               <Label>Search Scope</Label>
               <Select value={scopeFolder} onValueChange={setScopeFolder}>
@@ -150,12 +153,51 @@ export default function Chat() {
                 </SelectContent>
               </Select>
             </div>
+
+            <div className="space-y-2">
+              <Label className="flex items-center gap-2">
+                <Cpu className="h-4 w-4" />
+                AI Model
+              </Label>
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger data-testid="model-select">
+                  <SelectValue placeholder="Select Model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gpt-5">
+                    <div className="flex flex-col">
+                      <span>GPT-5</span>
+                      <span className="text-xs text-muted-foreground">Latest & Most Advanced</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="gpt-4o">
+                    <div className="flex flex-col">
+                      <span>GPT-4o</span>
+                      <span className="text-xs text-muted-foreground">High Performance</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="gpt-4o-mini">
+                    <div className="flex flex-col">
+                      <span>GPT-4o Mini</span>
+                      <span className="text-xs text-muted-foreground">Fast & Cost-effective</span>
+                    </div>
+                  </SelectItem>
+                  <SelectItem value="gpt-4">
+                    <div className="flex flex-col">
+                      <span>GPT-4</span>
+                      <span className="text-xs text-muted-foreground">Reliable & Capable</span>
+                    </div>
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
           </div>
 
           <div className="mt-4 p-3 bg-muted/50 rounded-lg">
             <p className="text-sm text-muted-foreground">
               <strong>Current scope:</strong> {scopeFolder === "all" ? "All Folders" : folders.find(f => f.id === scopeFolder)?.name}
-              {scopeAfi !== "all" && ` - ${scopeAfi}`}
+              {scopeAfi !== "all" && ` - ${scopeAfi}`} 
+              <span className="ml-4"><strong>Model:</strong> {selectedModel}</span>
             </p>
           </div>
         </CardContent>

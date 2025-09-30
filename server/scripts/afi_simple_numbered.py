@@ -28,31 +28,49 @@ class NumberedParagraphParser:
         
     def _extract_doc_id(self) -> str:
         """Extract document ID from filename"""
-        filename = Path(self.pdf_path).stem.lower()
-        doc_id = re.sub(r'[_\-\s]*(v\d+|final|draft).*$', '', filename)
-        return doc_id
+        # Use the exact filename without .pdf extension
+        filename = Path(self.pdf_path).stem
+        return filename
     
     def _extract_afi_number(self) -> str:
         """Extract the official AFI/DAFI number from the document"""
-        # Look in first few pages for the official designation
+        # Primary method: Use filename as-is (without .pdf)
+        filename = Path(self.pdf_path).stem
+        
+        # Try to clean up the filename for AFI format
+        # Handle patterns like "dafi 21-101", "dafi 21-101 accsup", "TO 00-20-1"
+        
+        # Check for Technical Orders first
+        to_match = re.search(r'(TO|to)\s*(\d{2}-\d{2,3}-\d+)', filename, re.IGNORECASE)
+        if to_match:
+            return f"TO {to_match.group(2)}"
+        
+        # Check for AFI/DAFI patterns with spaces and additional text
+        afi_match = re.search(r'(dafi|afi|afman)\s*(\d{2})[\s-]*(\d{3,4})(?:\s+(.+))?', filename, re.IGNORECASE)
+        if afi_match:
+            prefix = afi_match.group(1).upper()
+            if prefix.lower() == 'dafi':
+                prefix = 'DAFI'
+            number = f"{afi_match.group(2)}-{afi_match.group(3)}"
+            suffix = afi_match.group(4)
+            
+            if suffix:
+                # Include suffix like "ACCSUP"
+                return f"{prefix} {number} {suffix.upper()}"
+            else:
+                return f"{prefix} {number}"
+        
+        # Fallback: Look in document content
         for page_num in range(min(3, len(self.pdf.pages))):
             page = self.pdf.pages[page_num]
             text = page.extract_text()
             if text:
-                match = re.search(r'(DA?FI|AFI|AFMAN)\s*\d{2}-\d{3,4}', text)
+                match = re.search(r'(DA?FI|AFI|AFMAN|TO)\s*\d{2}-\d{2,4}', text)
                 if match:
                     return match.group(0)
         
-        # Fallback to filename
-        filename = Path(self.pdf_path).stem
-        match = re.search(r'(dafi|afi|afman)(\d{2})-?(\d{3,4})', filename, re.IGNORECASE)
-        if match:
-            prefix = match.group(1).upper()
-            if prefix.lower() == 'dafi':
-                prefix = 'DAFI'
-            return f"{prefix} {match.group(2)}-{match.group(3)}"
-        
-        return "UNKNOWN"
+        # Final fallback: return filename as-is
+        return filename
     
     def _determine_folder(self) -> str:
         """Determine logical folder based on AFI number"""

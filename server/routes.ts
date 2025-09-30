@@ -205,7 +205,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/chat/sessions/:id/messages", async (req, res) => {
     try {
-      const { role, content } = req.body;
+      const { role, content, model } = req.body;
       const sessionId = req.params.id;
       
       // Save user message
@@ -234,7 +234,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const ragResponse = await RAGChatService.askQuestion(content, {
             afi_number: session?.scopeAfi === "all" ? undefined : session?.scopeAfi,
             folder: folderName,
-            n_results: 5
+            n_results: 5,
+            model: model || "gpt-5" // Default to gpt-5 if no model specified
           });
           
           let aiResponseContent: string;

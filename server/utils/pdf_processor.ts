@@ -96,7 +96,7 @@ export class PDFProcessor {
     return new Promise((resolve) => {
       const scriptPath = path.join(this.SCRIPTS_DIR, "afi_simple_numbered.py");
       
-      const pythonProcess = spawn("python3", [
+      const pythonProcess = spawn("python", [
         scriptPath,
         "--pdf_path", pdfPath,
         "--output_csv", csvPath
@@ -176,7 +176,7 @@ export class PDFProcessor {
       const scriptPath = path.join(this.SCRIPTS_DIR, "csv_to_chromadb_openai.py");
       const chromaDir = path.join(process.cwd(), "chroma_storage_openai");
       
-      const pythonProcess = spawn("python3", [
+      const pythonProcess = spawn("python", [
         scriptPath,
         "--csv_path", csvPath,
         "--doc_id", docId,

@@ -9,7 +9,7 @@ import { Link } from "wouter";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 interface DocumentCardProps {
   document: Document;
@@ -29,7 +29,7 @@ export default function DocumentCard({ document }: DocumentCardProps) {
       // Show toast first before any state changes
       toast({
         title: "Document deleted",
-        description: `${document.filename} has been successfully deleted.`,
+        description: `${displayName} has been successfully deleted.`,
       });
       
       // Close dialog
@@ -48,6 +48,14 @@ export default function DocumentCard({ document }: DocumentCardProps) {
       });
     },
   });
+
+  const displayName = useMemo(() => {
+    if (!document.filename) {
+      return "Unknown Document";
+    }
+
+    return document.filename.replace(/\.[^./\\]+$/, "");
+  }, [document.filename]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -79,8 +87,8 @@ export default function DocumentCard({ document }: DocumentCardProps) {
         <div className="flex items-center gap-2">
           <FileText className="h-5 w-5 text-red-500" />
           <div>
-            <h3 className="font-semibold text-foreground">{document.afiNumber}</h3>
-            <p className="text-sm text-muted-foreground">{document.filename}</p>
+            <h3 className="font-semibold text-foreground">{displayName}</h3>
+            <p className="text-sm text-muted-foreground">{document.afiNumber}</p>
           </div>
         </div>
         <Badge className={getStatusColor(document.status)}>
@@ -172,7 +180,7 @@ export default function DocumentCard({ document }: DocumentCardProps) {
                 <AlertDialogHeader>
                   <AlertDialogTitle>Delete Document</AlertDialogTitle>
                   <AlertDialogDescription>
-                    Are you sure you want to delete "{document.filename}"? This action cannot be undone and will permanently remove the document and all associated data.
+                    Are you sure you want to delete "{displayName}"? This action cannot be undone and will permanently remove the document and all associated data.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>

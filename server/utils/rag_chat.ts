@@ -9,12 +9,30 @@ import path from "path";
 export interface RAGResponse {
   success: boolean;
   query: string;
+  response?: string;
   answer?: string;
+  raw_answer?: string;
   sources?: SourceCitation[];
   search_results_count?: number;
+  filtered_results_count?: number;
+  context?: ContextEntry[];
   model_used?: string;
+  model?: string;
+  filter_model_used?: string;
   embedding_model?: string;
+  hybrid_mode?: boolean;
+  template_used?: string;
   error?: string;
+  context_truncated?: boolean;
+  context_length?: number;
+  context_char_limit?: number;
+  min_score_used?: number;
+  filter_applied?: boolean;
+  relevance_filter_fallback?: boolean;
+  knowledge_fallback?: boolean;
+  request_id?: string;
+  source_annotations?: SourceAnnotation[];
+  timings?: RAGTimings;
 }
 
 export interface SourceCitation {
@@ -23,7 +41,29 @@ export interface SourceCitation {
   chapter: string;
   paragraph: string;
   similarity_score: number;
+  weighted_score?: number;
   text_preview: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ContextEntry {
+  reference: number;
+  text: string;
+  metadata: Record<string, unknown>;
+  similarity_score?: number;
+  weighted_score?: number;
+}
+
+export interface SourceAnnotation {
+  reference: number;
+  label: string;
+}
+
+export interface RAGTimings {
+  total_ms: number;
+  retrieval_ms?: number;
+  filter_ms?: number;
+  generation_ms?: number;
 }
 
 export interface RAGFilters {
@@ -32,6 +72,10 @@ export interface RAGFilters {
   folder?: string;
   n_results?: number;
   model?: string;
+  hybrid_mode?: boolean;
+  min_score?: number;
+  skip_filter?: boolean;
+  max_tokens?: number;
 }
 
 export class RAGChatService {
@@ -46,7 +90,7 @@ export class RAGChatService {
     filters?: RAGFilters
   ): Promise<RAGResponse> {
     return new Promise((resolve) => {
-      const scriptPath = path.join(this.SCRIPTS_DIR, "rag_chat_openai.py");
+  const scriptPath = path.join(this.SCRIPTS_DIR, "query", "run_rag_chat.py");
       
       // Build command arguments
       const args = [
@@ -75,6 +119,23 @@ export class RAGChatService {
       
       if (filters?.model) {
         args.push("--model", filters.model);
+      }
+      
+      // Add hybrid mode support (default is true, so only add --no-hybrid if explicitly disabled)
+      if (filters?.hybrid_mode === false) {
+        args.push("--no-hybrid");
+      }
+
+      if (typeof filters?.min_score === "number") {
+        args.push("--min-score", filters.min_score.toString());
+      }
+
+      if (filters?.skip_filter) {
+        args.push("--no-filter");
+      }
+
+      if (filters?.max_tokens) {
+        args.push("--max-tokens", filters.max_tokens.toString());
       }
       
       console.log(`🤖 RAG Chat: Asking "${query}"`);

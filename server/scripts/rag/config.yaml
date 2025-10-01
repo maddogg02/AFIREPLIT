@@ -1,0 +1,75 @@
+defaults:
+  min_similarity: 0.05
+  context_token_multiplier: 4
+  default_max_tokens: 1500
+  embedding_model: text-embedding-3-small
+  context_truncation_notice: "\n[...truncated for length...]"
+  embedding_cache_size: 128
+  filter_min_similarity: 0.05
+
+retrieval:
+  important_keywords: []  # Optional: add domain-specific keywords to prioritize passages.
+  toc_patterns:
+    - "^chapter \\d+"
+    - "^\\d+\\.\\d+\\s+(section|chapter|role|purpose|scope|definitions?|overview)"
+    - "^table of contents?"
+    - "^section [ivx]+"
+    - "^appendix [a-z]"
+    - "^\\d+\\.\\s*[a-z\\s]+\\."
+  query_tweaks: []  # Optional: define trigger/addition pairs to auto-expand queries.
+
+prompts:
+  knowledge_only:
+    system: |-
+      You are an Air Force maintenance assistant with no retrieved AFI/DAFI passages. Answer from doctrine only and flag any model knowledge explicitly.
+    user: |-
+      Question:
+      {{ query }}
+
+      Sources:
+      {{ sources_summary }}
+
+      Context:
+      {{ context or "(No AFI/DAFI passages were retrieved.)" }}
+
+      Format the reply in Markdown with:
+      {% for section in sections -%}
+      - {{ section }}
+      {% endfor %}
+      {{ additional_notes }}
+  hybrid:
+    system: |-
+      You are an Air Force maintenance assistant. Ground answers in the provided AFI/DAFI context. You may add model knowledge when needed, but label it clearly.
+    user: |-
+      Question:
+      {{ query }}
+
+      Sources:
+      {{ sources_summary }}
+
+      Context:
+      {{ context or "(No AFI/DAFI passages were retrieved.)" }}
+
+      Format the reply in Markdown with:
+      {% for section in sections -%}
+      - {{ section }}
+      {% endfor %}
+      {{ additional_notes }}
+  strict:
+    system: |-
+      You are an AFI/DAFI assistant. Respond only with information from the provided context. If the context does not answer the question, state that plainly.
+    user: |-
+      Question:
+      {{ query }}
+
+      Sources:
+      {{ sources_summary }}
+
+      Context:
+      {{ context or "(No AFI/DAFI passages were retrieved.)" }}
+
+      Format the reply in Markdown with:
+      {% for section in sections -%}
+      - {{ section }}
+      {% endfor %}
+      {{ additional_notes }}

@@ -41,7 +41,7 @@ export class SemanticSearchService {
     filters?: SearchFilters
   ): Promise<SearchResponse> {
     return new Promise((resolve) => {
-      const scriptPath = path.join(this.SCRIPTS_DIR, "search_chromadb_openai.py");
+  const scriptPath = path.join(this.SCRIPTS_DIR, "query", "search_chromadb.py");
       
       // Build command arguments
       const args = [
@@ -138,7 +138,7 @@ export class SemanticSearchService {
    */
   static async getCollectionStats(): Promise<any> {
     return new Promise((resolve) => {
-      const scriptPath = path.join(this.SCRIPTS_DIR, "search_chromadb_openai.py");
+  const scriptPath = path.join(this.SCRIPTS_DIR, "query", "search_chromadb.py");
       
       const pythonProcess = spawn("python", [
         scriptPath,

@@ -19,6 +19,20 @@ export class PDFProcessor {
   private static readonly TEMP_DIR = path.join(process.cwd(), "temp");
   private static readonly UPLOADS_DIR = path.join(process.cwd(), "uploads");
 
+  private static deriveAfiNumberFromFilename(filePath: string, originalFilename?: string): string | undefined {
+    const source = originalFilename ?? path.basename(filePath);
+    if (!source) {
+      return undefined;
+    }
+
+    const basename = source.endsWith(path.extname(source))
+      ? source.slice(0, source.length - path.extname(source).length)
+      : source;
+
+    const trimmed = basename?.trim();
+    return trimmed || undefined;
+  }
+
   static async ensureDirectories(): Promise<void> {
     const dirs = [this.SCRIPTS_DIR, this.TEMP_DIR, this.UPLOADS_DIR];
     for (const dir of dirs) {
@@ -36,7 +50,9 @@ export class PDFProcessor {
   static async processPDFToRAG(
     pdfPath: string,
     docId: string,
-    onProgress?: (progress: number, message?: string) => void
+    onProgress?: (progress: number, message?: string) => void,
+    originalFilename?: string,
+    precomputedAfiName?: string
   ): Promise<ProcessingResult> {
     try {
       await this.ensureDirectories();
@@ -50,11 +66,14 @@ export class PDFProcessor {
       onProgress?.(10, "Running AFI PDF parser...");
       
       // Step 1: PDF → CSV (10-40%)
-      const parseResult = await this.runAFIParser(pdfPath, csvPath);
+  const parseResult = await this.runAFIParser(pdfPath, csvPath, originalFilename);
       
       if (!parseResult.success) {
         throw new Error(`PDF parsing failed: ${parseResult.error}`);
       }
+
+  const filenameDerivedAfi = this.deriveAfiNumberFromFilename(pdfPath, originalFilename);
+  const afiOverride = filenameDerivedAfi || precomputedAfiName || parseResult.afiNumber;
 
       onProgress?.(40, "PDF parsed! Generating OpenAI embeddings...");
       
@@ -63,7 +82,7 @@ export class PDFProcessor {
         // Map embedding progress (0-100%) to overall progress (40-95%)
         const mappedProgress = 40 + (embeddingProgress * 0.55);
         onProgress?.(Math.round(mappedProgress), rowInfo || "Creating OpenAI embeddings...");
-      });
+      }, afiOverride);
       
       if (!embeddingResult.success) {
         throw new Error(`ChromaDB embedding failed: ${embeddingResult.error}`);
@@ -71,11 +90,17 @@ export class PDFProcessor {
 
       onProgress?.(100, "RAG pipeline complete! Ready for semantic search.");
 
+      const finalAfiNumber = afiOverride
+        || embeddingResult.afiNumber
+        || parseResult.afiNumber
+        || precomputedAfiName
+        || filenameDerivedAfi;
+
       return {
         success: true,
         csvPath,
         recordCount: parseResult.recordCount,
-        afiNumber: parseResult.afiNumber,
+        afiNumber: finalAfiNumber,
         chapters: parseResult.chapters,
         embeddingCount: embeddingResult.embeddingCount,
         collectionName: embeddingResult.collectionName,
@@ -91,16 +116,23 @@ export class PDFProcessor {
 
   private static async runAFIParser(
     pdfPath: string, 
-    csvPath: string
+    csvPath: string,
+    originalFilename?: string
   ): Promise<{ success: boolean; error?: string; recordCount?: number; afiNumber?: string; chapters?: number }> {
     return new Promise((resolve) => {
-      const scriptPath = path.join(this.SCRIPTS_DIR, "afi_simple_numbered.py");
+  const scriptPath = path.join(this.SCRIPTS_DIR, "ingest", "extract_numbered_paragraphs.py");
       
-      const pythonProcess = spawn("python", [
+      const args = [
         scriptPath,
         "--pdf_path", pdfPath,
-        "--output_csv", csvPath
-      ], {
+        "--output_csv", csvPath,
+      ];
+
+      if (originalFilename) {
+        args.push("--original_name", originalFilename);
+      }
+
+      const pythonProcess = spawn("python", args, {
         env: { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
@@ -170,18 +202,25 @@ export class PDFProcessor {
   private static async processCSVToChromaDB(
     csvPath: string,
     docId: string,
-    onProgress?: (progress: number, message?: string) => void
-  ): Promise<{ success: boolean; error?: string; embeddingCount?: number; collectionName?: string }> {
+    onProgress?: (progress: number, message?: string) => void,
+    afiNumberOverride?: string
+  ): Promise<{ success: boolean; error?: string; embeddingCount?: number; collectionName?: string; afiNumber?: string }> {
     return new Promise((resolve) => {
-      const scriptPath = path.join(this.SCRIPTS_DIR, "csv_to_chromadb_openai.py");
+  const scriptPath = path.join(this.SCRIPTS_DIR, "ingest", "csv_to_chromadb.py");
       const chromaDir = path.join(process.cwd(), "chroma_storage_openai");
-      
-      const pythonProcess = spawn("python", [
+
+      const args = [
         scriptPath,
         "--csv_path", csvPath,
         "--doc_id", docId,
-        "--chroma_dir", chromaDir
-      ], {
+        "--chroma_dir", chromaDir,
+      ];
+
+      if (afiNumberOverride) {
+        args.push("--afi_number_override", afiNumberOverride);
+      }
+
+      const pythonProcess = spawn("python", args, {
         env: { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
@@ -194,6 +233,7 @@ export class PDFProcessor {
       let embeddingCount = 0;
       let collectionName = "afi_documents_openai";
       let totalRows = 0;
+      let effectiveAfiNumber: string | undefined = afiNumberOverride;
 
       pythonProcess.stdout.on("data", (data) => {
         const output = data.toString();
@@ -219,6 +259,16 @@ export class PDFProcessor {
           onProgress?.(50, `Stored batch of ${batchSize} OpenAI embeddings`);
         }
 
+        const overrideMatch = output.match(/\[INFO\] Using AFI number override: (.+)/);
+        if (overrideMatch) {
+          effectiveAfiNumber = overrideMatch[1].trim();
+        }
+
+        const processingMatch = output.match(/Processing AFI: (.+)/);
+        if (processingMatch) {
+          effectiveAfiNumber = processingMatch[1].trim();
+        }
+
         // Extract final counts
         const totalDocsMatch = output.match(/Total documents in collection: (\d+)/);
         if (totalDocsMatch) {
@@ -241,7 +291,8 @@ export class PDFProcessor {
           resolve({ 
             success: true, 
             embeddingCount,
-            collectionName
+            collectionName,
+            afiNumber: effectiveAfiNumber
           });
         } else {
           resolve({ 

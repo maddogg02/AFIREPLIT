@@ -94,10 +94,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "folderId is required" });
       }
 
+      const filenameBase = path.parse(req.file.originalname).name.trim() || req.file.originalname;
+
       const documentData = {
         folderId,
         filename: req.file.originalname,
-        afiNumber: "EXTRACTING", // Will be updated after Python processing
+        afiNumber: filenameBase,
         fileSize: req.file.size,
         status: "processing" as const,
       };
@@ -105,7 +107,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const document = await storage.createDocument(documentData);
 
       // Start Python processing in background
-      processPDFAsync(req.file.path, document.id);
+      processPDFAsync(req.file.path, document.id, req.file.originalname, filenameBase);
 
       res.status(201).json({ ...document, documentId: document.id });
     } catch (error) {
@@ -231,8 +233,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.log(`🤖 Generating RAG response for: "${content}"`);
           
           // Use RAG system to generate response
+          const scopedAfi = session?.scopeAfi && session.scopeAfi !== "all" ? session.scopeAfi : undefined;
+
           const ragResponse = await RAGChatService.askQuestion(content, {
-            afi_number: session?.scopeAfi === "all" ? undefined : session?.scopeAfi,
+            afi_number: scopedAfi,
             folder: folderName,
             n_results: 5,
             model: model || "gpt-5" // Default to gpt-5 if no model specified
@@ -343,7 +347,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 }
 
 // Complete RAG pipeline processing
-async function processPDFAsync(filePath: string, documentId: string) {
+async function processPDFAsync(filePath: string, documentId: string, originalFilename?: string, initialAfiName?: string) {
   try {
     console.log(`Starting RAG pipeline for document ${documentId}`);
     
@@ -357,14 +361,16 @@ async function processPDFAsync(filePath: string, documentId: string) {
           processingProgress: progress,
           status: progress < 100 ? "processing" : "complete"
         });
-      }
+      },
+      originalFilename,
+      initialAfiName
     );
 
     if (result.success) {
       // Update document with final status and extracted AFI number - RAG pipeline complete
       await storage.updateDocument(documentId, {
         status: "complete",
-        afiNumber: result.afiNumber || "UNKNOWN", // Update with extracted AFI number
+        afiNumber: result.afiNumber || initialAfiName || "UNKNOWN", // Update with extracted AFI number
         totalChunks: result.embeddingCount || result.recordCount || 0,
         processingProgress: 100
       });

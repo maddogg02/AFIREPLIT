@@ -138,19 +138,20 @@ def annotate_answer_with_sources(answer: str, sources: List[Dict[str, Any]]) -> 
     if not answer or not sources:
         return answer
 
-    citation_lines = []
+    citation_lines: List[str] = []
     for source in sources:
         label = format_source_label(source["reference"], source["metadata"])
         full_text = source.get("text", "")
         if full_text:
-            citation_lines.append(f"- {label}\n  {full_text}")
+            cleaned_text = full_text.strip()
+            citation_lines.append(f"{label}  \n {cleaned_text}")
         else:
-            citation_lines.append(f"- {label}")
+            citation_lines.append(label)
 
     citations_block = "## Citations\n" + "\n\n".join(citation_lines)
 
     if "model knowledge" in answer.lower() and "model knowledge" not in "\n".join(citation_lines).lower():
-        citations_block += "\n- Model knowledge: See 'Model Knowledge' section"
+        citations_block += "\n\nModel knowledge: See 'Model Knowledge' section"
 
     if "## Citations" in answer:
         return re.sub(r"## Citations\b[\s\S]*$", citations_block, answer).strip() + "\n"

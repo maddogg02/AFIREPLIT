@@ -14,7 +14,7 @@ import csv
 import uuid
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 
 
 class NumberedParagraphParser:
@@ -23,9 +23,9 @@ class NumberedParagraphParser:
         self.pdf = pdfplumber.open(pdf_path)
         self.current_chapter = None
         self.current_section = None
-        self.doc_id = self._extract_doc_id()
         self.original_name = original_name
         self.file_stem = self._determine_file_stem()
+        self.doc_id = self._extract_doc_id()
         self.canonical_afi_number = self._extract_canonical_afi_number()
         self.afi_number = self._extract_afi_number()
         self.folder = self._determine_folder()
@@ -34,14 +34,15 @@ class NumberedParagraphParser:
         if self.original_name:
             name = Path(self.original_name).stem
             if name:
-                return name
+                return name.strip()
         return Path(self.pdf_path).stem
         
     def _extract_doc_id(self) -> str:
-        """Extract document ID from filename"""
-        # Use the exact filename without .pdf extension
-        filename = Path(self.pdf_path).stem
-        return filename
+        """Extract document ID from filename using legacy naming convention."""
+        stem = (self.file_stem or Path(self.pdf_path).stem).lower()
+        doc_id = re.sub(r'[_\-\s]*(v\d+|rev\d+|final|draft).*$', '', stem)
+        doc_id = doc_id.strip('_- ')
+        return doc_id or stem
     
     def _extract_canonical_afi_number(self) -> Optional[str]:
         """Attempt to derive a canonical AFI designation for folder classification."""
@@ -67,7 +68,40 @@ class NumberedParagraphParser:
         return None
 
     def _extract_afi_number(self) -> str:
-        """Use the original filename (without extension) as the AFI identifier."""
+        """Extract the official AFI/DAFI number from the document when possible."""
+        try:
+            page_count = len(self.pdf.pages)
+        except Exception:
+            page_count = 0
+
+        for page_index in range(min(3, page_count)):
+            try:
+                page = self.pdf.pages[page_index]
+                text = page.extract_text()
+            except Exception:
+                text = None
+
+            if not text:
+                continue
+
+            match = re.search(r'(DA?FI|AFI|AFMAN)\s*\d{2}-\d{3,4}', text, re.IGNORECASE)
+            if match:
+                prefix = match.group(1).upper()
+                digits = re.search(r'\d{2}-\d{3,4}', match.group(0))
+                if digits:
+                    return f"{prefix} {digits.group(0)}"
+                return match.group(0).upper()
+
+        for source in [self.canonical_afi_number, self.file_stem]:
+            if not source:
+                continue
+            match = re.search(r'(dafi|afi|afman)(\d{2})-?(\d{3,4})', source, re.IGNORECASE)
+            if match:
+                prefix = match.group(1).upper()
+                if prefix.lower() == 'dafi':
+                    prefix = 'DAFI'
+                return f"{prefix} {match.group(2)}-{match.group(3)}"
+
         return self.file_stem
     
     def _determine_folder(self) -> str:
@@ -80,13 +114,15 @@ class NumberedParagraphParser:
             'dafi33': 'Communications', 'afi33': 'Communications',
         }
 
-        source = (self.canonical_afi_number or self.afi_number or '').lower()
-        match = re.search(r'(da?fi|afi)\s*(\d{2})-\d{3,4}', source)
-        if match:
-            prefix = match.group(1)
-            number = match.group(2)
-            key = f"{prefix}{number}"
-            return afi_folders.get(key, 'General')
+        for source in filter(None, [self.afi_number, self.canonical_afi_number, self.file_stem]):
+            match = re.search(r'(da?fi|afi)\s*(\d{2})-\d{3,4}', source.lower())
+            if match:
+                prefix = 'dafi' if match.group(1).startswith('da') else 'afi'
+                number = match.group(2)
+                key = f"{prefix}{number}"
+                folder = afi_folders.get(key)
+                if folder:
+                    return folder
 
         return 'General'
     
@@ -131,17 +167,20 @@ class NumberedParagraphParser:
         return None
     
     def _extract_numbered_paragraph(self, text: str) -> Optional[str]:
-        """Extract paragraph number from text (1.1, 1.2.3, 1.2.3.4, etc.)"""
+        """Extract paragraph number from text (1.1, 1.2.3, 1.2.3.4, 8.9, 11.1, etc.)"""
         if not text:
             return None
             
         text = text.strip()
         
         # Look for numbered paragraph patterns at start of text
-        # Matches: 1.1, 1.2.3, 1.2.3.4, etc.
-        match = re.match(r'^(\d+(?:\.\d+)+)\.?\s', text)
+        # Matches: 1.1, 1.2.3, 1.2.3.4, 8.9, 11.1, 8.9:, 11.1:, etc.
+        # This pattern captures single-level (8.9) and multi-level (8.9.2.6.4) numbers
+        match = re.match(r'^(\d+(?:\.\d+)*)[\.:]\s', text)
         if match:
-            return match.group(1)
+            # Normalize to dots only (remove trailing colons/periods)
+            para_num = match.group(1)
+            return para_num
             
         return None
     
@@ -237,104 +276,118 @@ class NumberedParagraphParser:
         
         all_text_blocks = []
         
-        # First pass: Extract all text with position info
         for page_num, page in enumerate(self.pdf.pages, 1):
             print(f"Processing page {page_num}...")
-            
-            text = page.extract_text()
+
+            try:
+                text = page.extract_text()
+            except Exception:
+                text = None
+
             if not text:
                 continue
-            
-            # Get character-level info for bold detection
+
             try:
                 chars = page.chars
-            except:
+            except Exception:
                 chars = []
-            
+
             lines = text.split('\n')
-            
-            for line in lines:
-                line = line.strip()
-                if not line or len(line) < 5:
+            current_paragraph: Optional[str] = None
+            current_text_lines: List[str] = []
+            paragraph_start_page: Optional[int] = None
+
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line or len(line) < 3:
                     continue
-                
-                # Check for chapter header
+
                 chapter_num = self._is_chapter_header(line, chars)
                 if chapter_num:
+                    if current_paragraph and current_text_lines:
+                        block_chapter = self.current_chapter or self._extract_chapter_from_paragraph(current_paragraph)
+                        combined_text = ' '.join(current_text_lines)
+                        all_text_blocks.append({
+                            'page': paragraph_start_page or page_num,
+                            'paragraph': current_paragraph,
+                            'text': combined_text,
+                            'chapter': block_chapter
+                        })
+                        current_paragraph = None
+                        current_text_lines = []
+                        paragraph_start_page = None
+
                     self.current_chapter = chapter_num
                     print(f"Found Chapter {chapter_num} on page {page_num}")
                     continue
-                
-                # Check for numbered paragraph
+
                 paragraph_num = self._extract_numbered_paragraph(line)
                 if paragraph_num:
-                    # Extract chapter number from paragraph (e.g., "1.1" -> chapter 1)
+                    if current_paragraph and current_text_lines:
+                        block_chapter = self.current_chapter or self._extract_chapter_from_paragraph(current_paragraph)
+                        combined_text = ' '.join(current_text_lines)
+                        all_text_blocks.append({
+                            'page': paragraph_start_page or page_num,
+                            'paragraph': current_paragraph,
+                            'text': combined_text,
+                            'chapter': block_chapter
+                        })
+
                     chapter_from_paragraph = self._extract_chapter_from_paragraph(paragraph_num)
                     if chapter_from_paragraph:
                         self.current_chapter = chapter_from_paragraph
-                    
-                    all_text_blocks.append({
-                        'page': page_num,
-                        'paragraph': paragraph_num,
-                        'text': line,
-                        'chapter': self.current_chapter
-                    })
-        
-        # Second pass: Combine text blocks that belong together
-        combined_blocks = []
-        current_block = None
-        
+
+                    current_paragraph = paragraph_num
+                    current_text_lines = [line]
+                    paragraph_start_page = page_num
+                elif current_paragraph:
+                    if not re.match(r'^\d+$', line) and not re.match(r'^(Chapter|CHAPTER)\s+\d+', line):
+                        current_text_lines.append(line)
+
+            if current_paragraph and current_text_lines:
+                block_chapter = self.current_chapter or self._extract_chapter_from_paragraph(current_paragraph)
+                combined_text = ' '.join(current_text_lines)
+                all_text_blocks.append({
+                    'page': paragraph_start_page or page_num,
+                    'paragraph': current_paragraph,
+                    'text': combined_text,
+                    'chapter': block_chapter
+                })
+
         for block in all_text_blocks:
-            if current_block is None:
-                current_block = block.copy()
-            else:
-                # Check if this is a new numbered paragraph
-                if block['paragraph']:
-                    # Save the previous block
-                    combined_blocks.append(current_block)
-                    # Start new block
-                    current_block = block.copy()
-                else:
-                    # This is continuation text, add to current block
-                    current_block['text'] += ' ' + block['text']
-        
-        # Don't forget the last block
-        if current_block:
-            combined_blocks.append(current_block)
-        
-        # Third pass: Create records
-        for block in combined_blocks:
-            if not block.get('paragraph') or not block.get('chapter'):
+            paragraph_num = block.get('paragraph')
+            if not paragraph_num:
                 continue
-            
-            paragraph_num = block['paragraph']
-            text = block['text']
-            
-            # Remove paragraph number from beginning of text
+
+            chapter_value = block.get('chapter') or self._extract_chapter_from_paragraph(paragraph_num)
+            if not chapter_value:
+                continue
+
+            text = block.get('text', '')
             clean_text = re.sub(rf'^{re.escape(paragraph_num)}\.?\s*', '', text)
             clean_text = self._clean_text(clean_text)
-            
-            if clean_text and len(clean_text) > 10:  # Only meaningful content
+
+            if clean_text and len(clean_text) > 10:
                 compliance_tier = self._extract_compliance_tier(clean_text)
                 section_num = self._extract_section_from_paragraph(paragraph_num)
-                section_path = self._build_section_path(paragraph_num, block['chapter'])
+                section_path = self._build_section_path(paragraph_num, chapter_value)
                 category = self._categorize_content(clean_text)
-                
+
                 record = {
                     'embedding_id': str(uuid.uuid4()),
                     'doc_id': self.doc_id,
                     'folder': self.folder,
                     'afi_number': self.afi_number,
-                    'chapter': block['chapter'],
+                    'chapter': chapter_value,
                     'section': section_num or '',
                     'paragraph': paragraph_num,
                     'text': clean_text,
                     'section_path': section_path,
                     'category': category,
                     'compliance_tier': compliance_tier or '',
-                    'page_number': block['page']
+                    'page_number': block.get('page')
                 }
-                
+
                 records.append(record)
                 print(f"  Added {paragraph_num}: {clean_text[:60]}...")
         

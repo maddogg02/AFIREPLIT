@@ -7,6 +7,7 @@ export default function Header() {
   const navItems = [
     { href: "/upload", label: "Document Upload", id: "upload" },
     { href: "/library", label: "Document Library", id: "library" },
+    { href: "/master-library", label: "Master Library", id: "master-library" },
     { href: "/chat", label: "AI Assistant", id: "chat" },
     { href: "/settings", label: "Settings", id: "settings" },
   ];

@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Filter, Plus } from "lucide-react";
 import DocumentCard from "@/components/library/document-card";
 import { Link } from "wouter";
-import { type Document, type Folder } from "@shared/schema";
+import { type Document, type Folder } from "@/types/library";
 
 export default function Library() {
   const [selectedFolder, setSelectedFolder] = useState<string>("all");

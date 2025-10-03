@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { storage } from "./storage";
+import { storage, type DocumentFilters } from "./storage";
 import { insertFolderSchema, insertDocumentSchema, insertChatSessionSchema, insertChatMessageSchema } from "@shared/schema";
 import multer from "multer";
 import path from "path";
@@ -9,6 +9,7 @@ import { PDFProcessor } from "./utils/pdf_processor";
 import { OpenAIService } from "./utils/openai_service";
 import { SemanticSearchService } from "./utils/semantic_search";
 import { RAGChatService } from "./utils/rag_chat";
+import { SupabaseStorageService } from "./utils/supabase_storage";
 
 // Configure multer for file uploads
 const upload = multer({
@@ -48,9 +49,57 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.patch("/api/folders/:id", async (req, res) => {
+    try {
+      const { name, description } = req.body as { name?: string; description?: string };
+      const updates: Record<string, any> = {};
+      if (typeof name === "string" && name.trim()) updates.name = name.trim();
+      if (typeof description === "string") updates.description = description;
+
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({ error: "No updates provided" });
+      }
+
+      const updated = await storage.updateFolder(req.params.id, updates);
+      res.json(updated);
+    } catch (error) {
+      console.error("Error updating folder:", error);
+      res.status(500).json({ error: "Failed to update folder" });
+    }
+  });
+
   app.delete("/api/folders/:id", async (req, res) => {
     try {
-      await storage.deleteFolder(req.params.id);
+      const folderId = req.params.id;
+
+      // Find all documents in this folder and delete them via the same logic as /api/documents/:id
+      const docs = await storage.getDocuments({ folderId });
+      for (const document of docs) {
+        try {
+          if (document.storagePath) {
+            try {
+              await SupabaseStorageService.deletePDF(document.storagePath);
+              console.log(`🗑️ Deleted PDF from Supabase: ${document.storagePath}`);
+            } catch (e) {
+              console.error("Failed to delete PDF from Supabase Storage:", e);
+            }
+          }
+          if (document.csvStoragePath) {
+            try {
+              await SupabaseStorageService.deleteCSV(document.csvStoragePath);
+              console.log(`🗑️ Deleted CSV from Supabase: ${document.csvStoragePath}`);
+            } catch (e) {
+              console.error("Failed to delete CSV from Supabase Storage:", e);
+            }
+          }
+          await storage.deleteDocument(document.id);
+        } catch (docErr) {
+          console.error(`Failed to delete document ${document.id} while deleting folder:`, docErr);
+        }
+      }
+
+      // Finally remove the folder itself
+      await storage.deleteFolder(folderId);
       res.status(204).send();
     } catch (error) {
       console.error("Error deleting folder:", error);
@@ -61,9 +110,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Documents
   app.get("/api/documents", async (req, res) => {
     try {
-      const { folderId } = req.query;
-      const documents = await storage.getDocuments(folderId as string);
-      res.json(documents);
+      const { folderId, status, search, afiSeries, limit, offset } = req.query;
+
+      const parsedStatus =
+        typeof status === "string" && ["processing", "complete", "error"].includes(status)
+          ? (status as DocumentFilters["status"])
+          : undefined;
+
+      const parsedLimit = typeof limit === "string" ? Number.parseInt(limit, 10) : undefined;
+      const parsedOffset = typeof offset === "string" ? Number.parseInt(offset, 10) : undefined;
+
+      const safeLimit =
+        typeof parsedLimit === "number" && Number.isFinite(parsedLimit) ? parsedLimit : undefined;
+      const safeOffset =
+        typeof parsedOffset === "number" && Number.isFinite(parsedOffset) ? parsedOffset : undefined;
+
+      const filters: DocumentFilters = {
+        folderId: typeof folderId === "string" && folderId !== "all" ? folderId : undefined,
+        status: parsedStatus,
+        search: typeof search === "string" && search.trim() ? search.trim() : undefined,
+        afiSeries: typeof afiSeries === "string" && afiSeries !== "all" ? afiSeries : undefined,
+        limit: safeLimit,
+        offset: safeOffset,
+      };
+
+      const documents = await storage.getDocuments(filters);
+
+      const documentsWithAvailability = await Promise.all(
+        documents.map(async (document) => {
+          const [hasPdf, hasParsedCsv] = await Promise.all([
+            document.storagePath
+              ? SupabaseStorageService.fileExists(document.storagePath)
+              : Promise.resolve(false),
+            document.csvStoragePath
+              ? SupabaseStorageService.fileExists(document.csvStoragePath)
+              : Promise.resolve(false),
+          ]);
+
+          return {
+            ...document,
+            hasPdf,
+            hasParsedCsv,
+          };
+        }),
+      );
+
+      res.json(documentsWithAvailability);
     } catch (error) {
       console.error("Error fetching documents:", error);
       res.status(500).json({ error: "Failed to fetch documents" });
@@ -76,7 +168,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!document) {
         return res.status(404).json({ error: "Document not found" });
       }
-      res.json(document);
+
+      const [hasPdf, hasParsedCsv] = await Promise.all([
+        document.storagePath
+          ? SupabaseStorageService.fileExists(document.storagePath)
+          : Promise.resolve(false),
+        document.csvStoragePath
+          ? SupabaseStorageService.fileExists(document.csvStoragePath)
+          : Promise.resolve(false),
+      ]);
+
+      res.json({
+        ...document,
+        hasPdf,
+        hasParsedCsv,
+      });
     } catch (error) {
       console.error("Error fetching document:", error);
       res.status(500).json({ error: "Failed to fetch document" });
@@ -94,20 +200,50 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "folderId is required" });
       }
 
-      const filenameBase = path.parse(req.file.originalname).name.trim() || req.file.originalname;
+      const isTechnicalOrder = String(req.body?.isTechnicalOrder ?? "false").toLowerCase() === "true";
+
+  const filenameBase = path.parse(req.file.originalname).name.trim() || req.file.originalname;
+  const normalizedBase = filenameBase.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+      let initialAfiName = normalizedBase;
+
+      if (isTechnicalOrder) {
+        const stripped = normalizedBase.replace(/^(?:T\.?O\.?|TECHNICAL\s+ORDER)[-_\s]*/i, "").trim();
+        initialAfiName = stripped ? `TO ${stripped}` : "TO";
+      }
 
       const documentData = {
         folderId,
         filename: req.file.originalname,
-        afiNumber: filenameBase,
+        afiNumber: initialAfiName,
         fileSize: req.file.size,
         status: "processing" as const,
       };
 
       const document = await storage.createDocument(documentData);
 
+      // Upload PDF to Supabase Storage
+      try {
+        const { storagePath, publicUrl } = await SupabaseStorageService.uploadPDF(
+          req.file.path,
+          document.id,
+          req.file.originalname
+        );
+
+        // Update document with storage information
+        await storage.updateDocument(document.id, {
+          storageBucket: 'afi-documents',
+          storagePath: storagePath,
+          storagePublicUrl: publicUrl,
+        });
+
+        console.log(`✅ PDF stored in Supabase: ${storagePath}`);
+      } catch (storageError) {
+        console.error('Failed to upload to Supabase Storage:', storageError);
+        // Continue processing even if Supabase upload fails
+      }
+
       // Start Python processing in background
-      processPDFAsync(req.file.path, document.id, req.file.originalname, filenameBase);
+      processPDFAsync(req.file.path, document.id, req.file.originalname, initialAfiName, { isTechnicalOrder });
 
       res.status(201).json({ ...document, documentId: document.id });
     } catch (error) {
@@ -128,6 +264,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.delete("/api/documents/:id", async (req, res) => {
     try {
+      const document = await storage.getDocument(req.params.id);
+      if (!document) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+
+      // Delete from Supabase Storage if exists
+      if (document.storagePath) {
+        try {
+          await SupabaseStorageService.deletePDF(document.storagePath);
+          console.log(`🗑️ Deleted PDF from Supabase: ${document.storagePath}`);
+        } catch (storageError) {
+          console.error("Failed to delete from Supabase Storage:", storageError);
+          // Continue with database deletion even if storage deletion fails
+        }
+      }
+
+      // Delete CSV from Supabase Storage if exists
+      if (document.csvStoragePath) {
+        try {
+          await SupabaseStorageService.deleteCSV(document.csvStoragePath);
+          console.log(`🗑️ Deleted CSV from Supabase: ${document.csvStoragePath}`);
+        } catch (storageError) {
+          console.error("Failed to delete CSV from Supabase Storage:", storageError);
+          // Continue with database deletion
+        }
+      }
+
+      // Delete from database
       await storage.deleteDocument(req.params.id);
       res.status(204).send();
     } catch (error) {
@@ -341,13 +505,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.sendFile(path.join(process.cwd(), "search-demo.html"));
   });
 
+  // Download/View PDF from Supabase Storage
+  app.get("/api/documents/:id/view", async (req, res) => {
+    try {
+      const document = await storage.getDocument(req.params.id);
+      if (!document) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+
+      if (!document.storagePath) {
+        return res.status(404).json({ error: "Document PDF not available in storage" });
+      }
+
+      const pdfExists = await SupabaseStorageService.fileExists(document.storagePath);
+      if (!pdfExists) {
+        return res.status(404).json({ error: "Document PDF not available in storage" });
+      }
+
+      // Generate a signed URL for secure access
+      const signedUrl = await SupabaseStorageService.getSignedUrl(document.storagePath);
+
+      // Redirect to the signed URL
+      res.redirect(signedUrl);
+    } catch (error: any) {
+      console.error("Error viewing document:", error);
+      if (typeof error?.statusCode === "number" && error.statusCode === 404) {
+        return res.status(404).json({ error: "Document PDF not available in storage" });
+      }
+      res.status(500).json({ error: "Failed to retrieve document" });
+    }
+  });
+
+  // Download/View parsed CSV from Supabase Storage
+  app.get("/api/documents/:id/view-csv", async (req, res) => {
+    try {
+      const document = await storage.getDocument(req.params.id);
+      if (!document) {
+        return res.status(404).json({ error: "Document not found" });
+      }
+
+      if (!document.csvStoragePath) {
+        return res.status(404).json({ error: "Parsed CSV not available in storage" });
+      }
+
+      const csvExists = await SupabaseStorageService.fileExists(document.csvStoragePath);
+      if (!csvExists) {
+        return res.status(404).json({ error: "Parsed CSV not available in storage" });
+      }
+
+      // Generate a signed URL for secure access
+      const signedUrl = await SupabaseStorageService.getSignedUrl(document.csvStoragePath);
+
+      // Set content-type header to force download
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="${document.afiNumber}_parsed.csv"`);
+
+      // Redirect to the signed URL (or stream the file)
+      res.redirect(signedUrl);
+    } catch (error: any) {
+      console.error("Error viewing CSV:", error);
+      if (typeof error?.statusCode === "number" && error.statusCode === 404) {
+        return res.status(404).json({ error: "Parsed CSV not available in storage" });
+      }
+      res.status(500).json({ error: "Failed to retrieve CSV" });
+    }
+  });
+
   const httpServer = createServer(app);
 
   return httpServer;
 }
 
 // Complete RAG pipeline processing
-async function processPDFAsync(filePath: string, documentId: string, originalFilename?: string, initialAfiName?: string) {
+async function processPDFAsync(
+  filePath: string,
+  documentId: string,
+  originalFilename?: string,
+  initialAfiName?: string,
+  options?: { isTechnicalOrder?: boolean }
+) {
   try {
     console.log(`Starting RAG pipeline for document ${documentId}`);
     
@@ -367,15 +603,43 @@ async function processPDFAsync(filePath: string, documentId: string, originalFil
     );
 
     if (result.success) {
+      // Upload CSV to Supabase Storage if it exists
+      if (result.csvPath && fs.existsSync(result.csvPath)) {
+        try {
+          const { storagePath: csvStoragePath } = await SupabaseStorageService.uploadCSV(
+            result.csvPath,
+            documentId,
+            originalFilename || 'document'
+          );
+          
+          // Update document with CSV storage path
+          await storage.updateDocument(documentId, {
+            csvStoragePath: csvStoragePath,
+          });
+          
+          console.log(`✅ CSV uploaded to Supabase: ${csvStoragePath}`);
+        } catch (csvError) {
+          console.error('Failed to upload CSV to Supabase Storage:', csvError);
+          // Continue even if CSV upload fails
+        }
+      }
+
       // Update document with final status and extracted AFI number - RAG pipeline complete
+      let finalAfiNumber = result.afiNumber || initialAfiName || "UNKNOWN";
+
+      if (options?.isTechnicalOrder && finalAfiNumber) {
+        const trimmed = finalAfiNumber.replace(/^(?:T\.?O\.?|TECHNICAL\s+ORDER)[-_\s]*/i, "").trim();
+        finalAfiNumber = trimmed ? `TO ${trimmed}` : "TO";
+      }
+
       await storage.updateDocument(documentId, {
         status: "complete",
-        afiNumber: result.afiNumber || initialAfiName || "UNKNOWN", // Update with extracted AFI number
+        afiNumber: finalAfiNumber, // Update with extracted AFI number
         totalChunks: result.embeddingCount || result.recordCount || 0,
         processingProgress: 100
       });
       
-      console.log(`✅ RAG pipeline complete for ${result.afiNumber}:`);
+  console.log(`✅ RAG pipeline complete for ${finalAfiNumber}:`);
       console.log(`  📄 ${result.recordCount} paragraphs extracted`);
       console.log(`  🧠 ${result.embeddingCount} OpenAI embeddings created`);
       console.log(`  🗃️ Stored in ChromaDB collection: ${result.collectionName}`);

@@ -69,4 +69,19 @@ app.use((req, res, next) => {
   }, () => {
     log(`serving on port ${port}`);
   });
+
+  if (process.env.ENABLE_STORAGE_BACKFILL === 'true') {
+    const delayMs = Number(process.env.STORAGE_BACKFILL_DELAY_MS ?? 2500);
+    setTimeout(async () => {
+      try {
+  log('queueing Supabase storage backfill...');
+  // @ts-expect-error - migrate_to_supabase_storage is a JavaScript module
+  const { migrateExistingDocuments } = await import("../migrate_to_supabase_storage.js");
+        await migrateExistingDocuments();
+        log('Supabase storage backfill complete');
+      } catch (error) {
+        console.error('Supabase storage backfill failed:', error);
+      }
+    }, delayMs);
+  }
 })();

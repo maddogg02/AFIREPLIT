@@ -40,6 +40,10 @@ DEFAULT_FILTER_MIN_SIMILARITY: float = float(_DEFAULTS_SECTION.get("filter_min_s
 _DEFAULT_IMPORTANT_KEYWORDS = tuple(_RETRIEVAL_SECTION.get("important_keywords", []))
 _DEFAULT_TOC_PATTERNS = tuple(_RETRIEVAL_SECTION.get("toc_patterns", []))
 _DEFAULT_QUERY_TWEAKS = tuple(_RETRIEVAL_SECTION.get("query_tweaks", []))
+_DEFAULT_RETRIEVAL_TOP_K = int(_RETRIEVAL_SECTION.get("top_k", 10))
+_DEFAULT_NEIGHBOR_HOPS = int(_RETRIEVAL_SECTION.get("neighbor_hops", 0))
+_DEFAULT_NEIGHBOR_FETCH_LIMIT = int(_RETRIEVAL_SECTION.get("neighbor_fetch_limit", 200))
+_DEFAULT_GROUP_BY_PREFIX = str(_RETRIEVAL_SECTION.get("group_by_prefix", "False")).lower() in {"1", "true", "yes", "on"}
 _DEFAULT_PROMPTS = _PROMPTS_SECTION if _PROMPTS_SECTION else {}
 
 
@@ -77,6 +81,10 @@ class RAGConfig:
 	toc_patterns: List[str] = field(default_factory=_copy_toc_patterns)
 	embedding_cache_size: int = DEFAULT_EMBEDDING_CACHE_SIZE
 	filter_min_similarity: float = DEFAULT_FILTER_MIN_SIMILARITY
+	retrieval_top_k: int = _DEFAULT_RETRIEVAL_TOP_K
+	neighbor_hops: int = _DEFAULT_NEIGHBOR_HOPS
+	neighbor_fetch_limit: int = _DEFAULT_NEIGHBOR_FETCH_LIMIT
+	group_by_prefix: bool = _DEFAULT_GROUP_BY_PREFIX
 
 	def get_prompt_template(self, mode: str) -> Dict[str, str]:
 		return self.prompts.get(mode, {})

@@ -19,15 +19,19 @@ export const folders = pgTable("folders", {
 
 export const documents = pgTable("documents", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  folderId: varchar("folder_id").notNull().references(() => folders.id, { onDelete: "cascade" }),
+  folderId: varchar("folder_id").references(() => folders.id, { onDelete: "cascade" }),
   filename: text("filename").notNull(),
   afiNumber: text("afi_number").notNull(),
   uploadDate: timestamp("upload_date").default(sql`CURRENT_TIMESTAMP`).notNull(),
   status: text("status").notNull().default("processing"), // processing, complete, error
-  csvPath: text("csv_path"),
+  csvPath: text("csv_path"), // Local CSV path (deprecated, use csvStoragePath)
   fileSize: integer("file_size"),
   totalChunks: integer("total_chunks").default(0),
   processingProgress: integer("processing_progress").default(0),
+  storageBucket: text("storage_bucket"), // Supabase Storage bucket name
+  storagePath: text("storage_path"), // Path in Supabase Storage for PDF
+  storagePublicUrl: text("storage_public_url"), // Public URL for accessing PDF
+  csvStoragePath: text("csv_storage_path"), // Path in Supabase Storage for parsed CSV
 });
 
 export const embeddings = pgTable("embeddings", {

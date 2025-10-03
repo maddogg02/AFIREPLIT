@@ -1,4 +1,4 @@
-import { spawn } from "child_process";
+import { spawn, spawnSync } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
@@ -18,6 +18,49 @@ export class PDFProcessor {
   private static readonly SCRIPTS_DIR = path.join(process.cwd(), "server", "scripts");
   private static readonly TEMP_DIR = path.join(process.cwd(), "temp");
   private static readonly UPLOADS_DIR = path.join(process.cwd(), "uploads");
+  private static readonly PYTHON_EXECUTABLE = PDFProcessor.resolvePythonExecutable();
+
+  private static resolvePythonExecutable(): string {
+    const candidates = [
+      process.env.PYTHON_EXECUTABLE,
+      process.env.PYTHON_PATH,
+      process.platform === "win32" ? "py" : undefined,
+      process.platform === "win32" ? "python" : undefined,
+      "python3",
+      "python",
+    ].filter((cmd): cmd is string => Boolean(cmd));
+
+    const tried = new Set<string>();
+    for (const candidate of candidates) {
+      if (tried.has(candidate)) continue;
+      tried.add(candidate);
+
+      try {
+        const result = spawnSync(candidate, ["--version"], { stdio: "ignore" });
+        if (!result.error && result.status === 0) {
+          if (process.env.DEBUG_PYTHON_RESOLUTION) {
+            console.log(`[PDFProcessor] Using Python executable: ${candidate}`);
+          }
+          return candidate;
+        }
+      } catch (error) {
+        // Candidate not available, try next
+      }
+    }
+
+    throw new Error(
+      "Unable to locate a working Python executable. Set PYTHON_EXECUTABLE in your environment or ensure Python is installed and available on PATH.",
+    );
+  }
+
+  private static formatExitCode(code: number | null): string {
+    if (code === null || Number.isNaN(code)) {
+      return "unknown";
+    }
+
+    const hex = code >= 256 ? ` (0x${code.toString(16).toUpperCase()})` : "";
+    return `${code}${hex}`;
+  }
 
   private static deriveAfiNumberFromFilename(filePath: string, originalFilename?: string): string | undefined {
     const source = originalFilename ?? path.basename(filePath);
@@ -132,10 +175,12 @@ export class PDFProcessor {
         args.push("--original_name", originalFilename);
       }
 
-      const pythonProcess = spawn("python", args, {
+      const pythonProcess = spawn(this.PYTHON_EXECUTABLE, args, {
         env: { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
+          PYTHONUNBUFFERED: '1',
+          PYTHONFAULTHANDLER: '1',
           HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
         }
       });
@@ -183,9 +228,10 @@ export class PDFProcessor {
             chapters 
           });
         } else {
+          const exitDescription = PDFProcessor.formatExitCode(code);
           resolve({ 
             success: false, 
-            error: `Python script exited with code ${code}: ${stderr}` 
+            error: `Python script exited with code ${exitDescription}: ${stderr || "no stderr output"}` 
           });
         }
       });
@@ -220,10 +266,12 @@ export class PDFProcessor {
         args.push("--afi_number_override", afiNumberOverride);
       }
 
-      const pythonProcess = spawn("python", args, {
+      const pythonProcess = spawn(this.PYTHON_EXECUTABLE, args, {
         env: { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
+          PYTHONUNBUFFERED: '1',
+          PYTHONFAULTHANDLER: '1',
           HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
         }
       });
@@ -295,9 +343,14 @@ export class PDFProcessor {
             afiNumber: effectiveAfiNumber
           });
         } else {
+          const exitDescription = PDFProcessor.formatExitCode(code);
+          let errorMessage = `ChromaDB script exited with code ${exitDescription}: ${stderr || "no stderr output"}`;
+          if (code === 3221225477) {
+            errorMessage += " — this indicates a Windows access violation (0xC0000005), usually caused by a native dependency crash. Verify that Python, ChromaDB, DuckDB, and PyMuPDF are installed for your Python version, or reinstall dependencies.";
+          }
           resolve({ 
             success: false, 
-            error: `ChromaDB script exited with code ${code}: ${stderr}` 
+            error: errorMessage
           });
         }
       });

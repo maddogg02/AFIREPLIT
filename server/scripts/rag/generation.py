@@ -38,12 +38,25 @@ class ResponseGenerator:
                 "## Model Knowledge",
                 "## Citations",
             ],
+            "procedural": [
+                "## Compliance Summary",
+                "## Procedural Checklist",
+                "## Unit Supplement Notes",
+                "## Model Knowledge",
+                "## Citations",
+            ],
         }
 
         self._notes_by_mode = {
             "knowledge_only": "\nState 'Model knowledge only — no AFI context retrieved.' in the Citations section.",
             "hybrid": "\nTag any doctrine not in the context under Model Knowledge and add a 'Model knowledge' entry in Citations.",
             "strict": "\nModel Knowledge must read 'None'.",
+            "procedural": (
+                "\nFor 'Procedural Checklist', output every numbered step or paragraph from the context in order. "
+                "Preserve the exact paragraph numbers (e.g., 8.9.2.1, 8.9.2.1.1), include full paragraph text, and cite each step individually. "
+                "If unit supplements (e.g., *_SUP) are present, list their directives under 'Unit Supplement Notes' with the same numbering and citations. "
+                "Do NOT summarize or skip steps."
+            ),
         }
 
         self._default_templates = {
@@ -89,6 +102,26 @@ class ResponseGenerator:
                     "{{ additional_notes }}"
                 ),
             },
+            "procedural": {
+                "system": (
+                    "You are an AFI/DAFI procedures expert. When the user asks for steps, processes, or 'how to' guidance, "
+                    "provide exhaustive, numbered step-by-step instructions directly from the retrieved context. "
+                    "Present each numbered paragraph or step individually, preserving the exact numbering sequence from the source. "
+                    "Include ALL related steps from adjacent sections. Always cite the chapter/paragraph reference with each step. "
+                    "Do NOT summarize or skip steps—reproduce the full procedural sequence."
+                ),
+                "user": (
+                    "Question:\n{{ query }}\n\n"
+                    "Sources:\n{{ sources_summary }}\n\n"
+                    "Context:\n{{ context or '(No AFI/DAFI passages were retrieved.)' }}\n\n"
+                    "Format the reply in Markdown with:\n"
+                    "{% for section in sections -%}\n- {{ section }}\n{% endfor %}\n"
+                    "{{ additional_notes }}\n\n"
+                    "IMPORTANT: Under 'Procedural Checklist', list EVERY numbered step found in the context, "
+                    "preserving the original paragraph numbers and sequence. Include full text for each step, not summaries. "
+                    "Group unit supplement directives under 'Unit Supplement Notes'."
+                ),
+            },
         }
 
     @property
@@ -121,11 +154,20 @@ class ResponseGenerator:
         sources: List[Dict[str, Any]],
         model: str,
         knowledge_only: bool,
+        procedural_mode: bool = False,
     ) -> Tuple[List[Dict[str, str]], int]:
         sources_for_prompt = summarize_sources_for_prompt(sources)
         context_for_prompt = context.strip() or "(No retrieved AFI/DAFI passages were available.)"
         max_tokens = self._config.default_max_tokens
-        mode_key = "knowledge_only" if knowledge_only else ("hybrid" if self._config.hybrid_mode else "strict")
+        
+        # Priority: procedural > knowledge_only > hybrid/strict
+        if procedural_mode:
+            mode_key = "procedural"
+        elif knowledge_only:
+            mode_key = "knowledge_only"
+        else:
+            mode_key = "hybrid" if self._config.hybrid_mode else "strict"
+            
         template_config = self._config.get_prompt_template(mode_key) or {}
         default_template = self._default_templates[mode_key]
 
@@ -181,8 +223,9 @@ class ResponseGenerator:
         model: str,
         sources: List[Dict[str, Any]],
         knowledge_only: bool = False,
+        procedural_mode: bool = False,
     ) -> Tuple[str, str]:
-        messages, max_tokens = self._build_prompts(user_query, context, sources, model, knowledge_only)
+        messages, max_tokens = self._build_prompts(user_query, context, sources, model, knowledge_only, procedural_mode)
         params = self._get_completion_params(model, max_tokens=max_tokens)
         params["messages"] = messages
 

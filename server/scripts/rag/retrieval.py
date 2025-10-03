@@ -29,6 +29,21 @@ class RetrievalEngine:
         self._embedding_cache_size = max(0, int(config.embedding_cache_size)) if config.embedding_cache_size else 0
         self._embedding_cache: "OrderedDict[Tuple[str, str], List[float]]" = OrderedDict()
         self._negative_similarity_warning_emitted = False
+        self._procedural_keywords = [
+            "how do i",
+            "steps to",
+            "procedure for",
+            "lost tool",
+            "found tool",
+            "reporting procedures",
+            "what are the steps",
+            "notify",
+        ]
+        self._default_top_k = max(1, getattr(config, "retrieval_top_k", 10))
+        self._neighbor_hops = max(0, getattr(config, "neighbor_hops", 0))
+        self._neighbor_fetch_limit = max(10, getattr(config, "neighbor_fetch_limit", 200))
+        self._group_by_prefix = getattr(config, "group_by_prefix", False)
+        self._chapter_cache: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
 
         if not self.silent:
             print(f"[RETRIEVAL] Distance metric detected: {self._distance_metric}")
@@ -175,10 +190,13 @@ class RetrievalEngine:
                     "text": text,
                     "metadata": metadata,
                     "similarity_score": similarity_score,
+                    "similarity": similarity_score,
                     "distance": distance,
                 }
             )
 
+        if n_results <= 0:
+            n_results = self._default_top_k
         return formatted_results[:n_results]
 
     def _detect_distance_metric(self) -> str:
@@ -247,3 +265,206 @@ class RetrievalEngine:
             if test_results:
                 return variant
         return afi_number
+
+    def detect_procedural_intent(self, query: str, docs: List[Dict[str, Any]]) -> bool:
+        """Detect if query or retrieved documents indicate procedural/step-by-step content."""
+        query_lower = query.lower()
+        
+        # Check query for procedural keywords
+        if any(keyword in query_lower for keyword in self._procedural_keywords) or "step" in query_lower or "procedure" in query_lower:
+            if not self.silent:
+                print("[RETRIEVAL] Procedural intent detected from query keywords")
+            return True
+        
+        # Check documents for numbered paragraph patterns (e.g., 8.9.2.1, 8.9.2.1.1)
+        numbered_para_pattern = re.compile(r'\b\d+\.\d+\.\d+(\.\d+)*\b')
+        for doc in docs[:3]:  # Check top 3 results
+            content = doc.get("text", "")
+            if numbered_para_pattern.search(content):
+                if not self.silent:
+                    print("[RETRIEVAL] Procedural intent detected from numbered paragraphs in results")
+                return True
+        
+        return False
+
+    # --- Neighbor expansion helpers -------------------------------------------------
+
+    @staticmethod
+    def _paragraph_to_tuple(paragraph: Optional[str]) -> Optional[Tuple[int, ...]]:
+        if not paragraph:
+            return None
+        parts: List[int] = []
+        for raw in paragraph.split('.'):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if not raw.isdigit():
+                # Allow values like "8a" by stripping trailing letters
+                numeric = ''.join(filter(str.isdigit, raw))
+                if not numeric:
+                    return None
+                parts.append(int(numeric))
+            else:
+                parts.append(int(raw))
+        return tuple(parts) if parts else None
+
+    def _get_chapter_documents(self, afi_number: str, chapter: Optional[str]) -> List[Dict[str, Any]]:
+        cache_key = (afi_number or "", chapter or "")
+        cached = self._chapter_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        where_filters: Dict[str, Any] = {"afi_number": afi_number}
+        if chapter:
+            where_filters["chapter"] = chapter
+
+        try:
+            raw = self._collection.get(
+                where=where_filters,
+                include=["documents", "metadatas", "ids"],
+                limit=self._neighbor_fetch_limit,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            if not self.silent:
+                print(f"[WARN] Failed to fetch neighbors for {afi_number} ch {chapter}: {exc}")
+            self._chapter_cache[cache_key] = []
+            return []
+
+        documents = raw.get("documents", []) or []
+        metadatas = raw.get("metadatas", []) or []
+        ids = raw.get("ids", []) or []
+
+        formatted: List[Dict[str, Any]] = []
+        for idx, text in enumerate(documents):
+            metadata = metadatas[idx] if idx < len(metadatas) else {}
+            formatted.append(
+                {
+                    "id": ids[idx] if idx < len(ids) else None,
+                    "text": text,
+                    "metadata": metadata,
+                }
+            )
+
+        self._chapter_cache[cache_key] = formatted
+        return formatted
+
+    def _select_neighbors(
+        self,
+        source_doc: Dict[str, Any],
+        chapter_docs: List[Dict[str, Any]],
+        hops: int,
+    ) -> List[Dict[str, Any]]:
+        if hops <= 0 or not chapter_docs:
+            return []
+
+        metadata = source_doc.get("metadata", {})
+        paragraph = metadata.get("paragraph")
+        target_tuple = self._paragraph_to_tuple(paragraph)
+        if not target_tuple:
+            return []
+
+        annotated: List[Tuple[Tuple[int, ...], Dict[str, Any]]] = []
+        for entry in chapter_docs:
+            para_value = entry.get("metadata", {}).get("paragraph")
+            tuple_value = self._paragraph_to_tuple(para_value)
+            if not tuple_value:
+                continue
+            annotated.append((tuple_value, entry))
+
+        if not annotated:
+            return []
+
+        annotated.sort(key=lambda item: item[0])
+        tuples_only = [item[0] for item in annotated]
+
+        try:
+            idx = tuples_only.index(target_tuple)
+        except ValueError:
+            return []
+
+        neighbors: List[Dict[str, Any]] = []
+        start = max(0, idx - hops)
+        end = min(len(annotated) - 1, idx + hops)
+        for position in range(start, end + 1):
+            if position == idx:
+                continue
+            neighbors.append(annotated[position][1])
+
+        # Include direct descendants (e.g., 8.9.2.1.1) up to the configured hop depth
+        descendant_limit = max(1, hops * 3)
+        descendants_added = 0
+        prefix_length = len(target_tuple)
+        for tuple_value, entry in annotated[idx + 1 :]:
+            if tuple_value[:prefix_length] != target_tuple:
+                break
+            if len(tuple_value) <= prefix_length:
+                continue
+            neighbors.append(entry)
+            descendants_added += 1
+            if descendants_added >= descendant_limit:
+                break
+
+        return neighbors
+
+    def expand_with_neighbors(self, docs: List[Dict[str, Any]], hops: Optional[int] = None) -> List[Dict[str, Any]]:
+        if not docs:
+            return []
+        effective_hops = self._neighbor_hops if hops is None else max(0, hops)
+        if effective_hops <= 0:
+            return docs
+
+        expanded: List[Dict[str, Any]] = []
+        seen_keys: set = set()
+
+        def _make_key(doc: Dict[str, Any]) -> Tuple[str, str]:
+            metadata = doc.get("metadata", {})
+            return (
+                doc.get("id") or metadata.get("paragraph", ""),
+                metadata.get("afi_number", ""),
+            )
+
+        for doc in docs:
+            key = _make_key(doc)
+            if key not in seen_keys:
+                expanded.append(doc)
+                seen_keys.add(key)
+
+            metadata = doc.get("metadata", {})
+            afi_number = metadata.get("afi_number")
+            chapter = metadata.get("chapter")
+            if not afi_number:
+                continue
+
+            chapter_docs = self._get_chapter_documents(afi_number, chapter)
+            neighbors = self._select_neighbors(doc, chapter_docs, effective_hops)
+
+            base_similarity = doc.get("similarity", doc.get("similarity_score", 0.0))
+            for order, neighbor in enumerate(neighbors, start=1):
+                neighbor_key = _make_key(neighbor)
+                if neighbor_key in seen_keys:
+                    continue
+
+                similarity_adjustment = max(base_similarity - 0.0005 * order, 0.0)
+                neighbor_result = {
+                    "id": neighbor.get("id"),
+                    "text": neighbor.get("text", ""),
+                    "metadata": neighbor.get("metadata", {}),
+                    "similarity_score": similarity_adjustment,
+                    "similarity": similarity_adjustment,
+                    "distance": None,
+                    "neighbor": True,
+                }
+
+                expanded.append(neighbor_result)
+                seen_keys.add(neighbor_key)
+
+        if self._group_by_prefix:
+            expanded.sort(
+                key=lambda entry: (
+                    entry.get("metadata", {}).get("afi_number", ""),
+                    self._paragraph_to_tuple(entry.get("metadata", {}).get("paragraph")) or (),
+                    -entry.get("similarity", 0.0),
+                )
+            )
+
+        return expanded

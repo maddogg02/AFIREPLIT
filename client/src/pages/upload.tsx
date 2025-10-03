@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,23 +9,48 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { Upload as UploadIcon, FileText, Folder, Plus, CheckCircle, Cog } from "lucide-react";
+import { Upload as UploadIcon, FileText, Folder, Plus, CheckCircle, Cog, Trash2, Loader2 } from "lucide-react";
 import ProgressIndicator from "@/components/upload/progress-indicator";
 // Removed PDFPreview - using Python script processing
 import { apiRequest } from "@/lib/queryClient";
-import { type Folder as FolderType } from "@shared/schema";
+import { type Folder as FolderType } from "@/types/library";
+import { SidebarLayout } from "@/components/layout/sidebar-layout";
+import { Switch } from "@/components/ui/switch";
 
 export default function Upload() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   
+  type FileItem = {
+    clientId: string;
+    file: File;
+    status: "pending" | "uploading" | "processing" | "completed" | "error";
+    progress: number;
+    message: string;
+    docId?: string;
+    isTechnicalOrder: boolean;
+  };
+
   const [currentStep, setCurrentStep] = useState(1);
   const [selectedFolder, setSelectedFolder] = useState("");
   const [newFolderName, setNewFolderName] = useState("");
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [processingProgress, setProcessingProgress] = useState(0);
-  const [processingMessage, setProcessingMessage] = useState("");
-  const [documentId, setDocumentId] = useState<string | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<FileItem[]>([]);
+  const [isProcessingBatch, setIsProcessingBatch] = useState(false);
+  const pollIntervals = useRef<Record<string, ReturnType<typeof setInterval>>>({});
+
+  const statusStyles: Record<FileItem["status"], { label: string; className: string }> = {
+    pending: { label: "Ready", className: "bg-muted text-muted-foreground" },
+    uploading: { label: "Uploading", className: "bg-primary/10 text-primary" },
+    processing: { label: "Processing", className: "bg-primary text-primary-foreground" },
+    completed: { label: "Completed", className: "bg-green-600 text-white" },
+    error: { label: "Error", className: "bg-destructive text-destructive-foreground" },
+  };
+
+  useEffect(() => {
+    return () => {
+      Object.values(pollIntervals.current).forEach(clearInterval);
+    };
+  }, []);
   // Removed PDF preview and TOC range - using Python script for processing
 
   // Fetch folders
@@ -52,10 +77,11 @@ export default function Upload() {
 
   // Upload document mutation
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, folderId }: { file: File; folderId: string }) => {
+    mutationFn: async ({ file, folderId, isTechnicalOrder }: { file: File; folderId: string; isTechnicalOrder?: boolean }) => {
       const formData = new FormData();
       formData.append("pdf", file);
       formData.append("folderId", folderId);
+      formData.append("isTechnicalOrder", isTechnicalOrder ? "true" : "false");
 
       const response = await fetch("/api/documents/upload", {
         method: "POST",
@@ -68,75 +94,163 @@ export default function Upload() {
 
       return response.json();
     },
-    onSuccess: (data) => {
-      setDocumentId(data.documentId);
-      setCurrentStep(3);
-      setProcessingProgress(10);
-      setProcessingMessage("Starting PDF processing...");
-      
-      // Start polling for progress
-      startProgressPolling(data.documentId);
-      
-      toast({
-        title: "Upload successful",
-        description: "Your document is being processed",
-      });
-    },
-    onError: () => {
-      toast({
-        title: "Upload failed",
-        description: "There was an error uploading your document",
-        variant: "destructive",
-      });
-    },
   });
 
   // Progress polling function
-  const startProgressPolling = (docId: string) => {
+  const startProgressPolling = (docId: string, clientId: string, fileName: string) => {
+    setSelectedFiles((prev) =>
+      prev.map((item) =>
+        item.clientId === clientId
+          ? {
+              ...item,
+              status: "processing",
+              docId,
+              progress: Math.max(item.progress, 10),
+              message: "Starting PDF processing...",
+            }
+          : item,
+      ),
+    );
+
     const pollInterval = setInterval(async () => {
       try {
         const response = await fetch(`/api/documents/${docId}/status`);
         if (response.ok) {
           const status = await response.json();
-          
-          setProcessingProgress(status.progress || 0);
-          setProcessingMessage(status.message || "Processing...");
-          
-          // Stop polling when complete
-          if (status.progress >= 100 || status.status === 'completed') {
+
+          setSelectedFiles((prev) =>
+            prev.map((item) => {
+              if (item.clientId !== clientId) return item;
+              const progress = status.progress ?? item.progress;
+              const message = status.message ?? item.message;
+              const isComplete = progress >= 100 || status.status === "completed";
+              return {
+                ...item,
+                progress,
+                message,
+                status: isComplete ? "completed" : "processing",
+              };
+            }),
+          );
+
+          if (status.progress >= 100 || status.status === "completed") {
             clearInterval(pollInterval);
+            delete pollIntervals.current[clientId];
+            queryClient.invalidateQueries({ queryKey: ["/api/documents"] });
             toast({
               title: "Processing complete",
-              description: "Your AFI document is ready for search",
+              description: `${fileName} is now ready for search`,
             });
           }
         }
       } catch (error) {
         console.log("Progress polling error:", error);
       }
-    }, 1000); // Poll every second
-    
-    // Clear interval after 10 minutes max
-    setTimeout(() => clearInterval(pollInterval), 600000);
+    }, 1000);
+
+    pollIntervals.current[clientId] = pollInterval;
+
+    setTimeout(() => {
+      if (pollIntervals.current[clientId]) {
+        clearInterval(pollIntervals.current[clientId]);
+        delete pollIntervals.current[clientId];
+      }
+    }, 600000);
   };
 
-  const handleFileUpload = (file: File) => {
-    if (file.type !== "application/pdf") {
+  const handleFilesUpload = (files: FileList | File[]) => {
+    const incomingFiles = Array.from(files);
+    if (!incomingFiles.length) return;
+
+    let invalidCount = 0;
+    const duplicates: string[] = [];
+    const validItems: FileItem[] = [];
+
+    incomingFiles.forEach((file) => {
+      if (file.type !== "application/pdf") {
+        invalidCount += 1;
+        return;
+      }
+
+      const isDuplicate = selectedFiles.some(
+        (item) => item.file.name === file.name && item.file.size === file.size,
+      );
+      if (isDuplicate) {
+        duplicates.push(file.name);
+        return;
+      }
+
+      const clientId = typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+      validItems.push({
+        clientId,
+        file,
+        status: "pending",
+        progress: 0,
+        message: "Ready — click Process Documents below to begin",
+        isTechnicalOrder: false,
+      });
+    });
+
+    if (invalidCount) {
       toast({
-        title: "Invalid file type",
-        description: "Please upload a PDF file.",
+        title: "Unsupported file",
+        description: invalidCount === 1
+          ? "Only PDF files are allowed."
+          : `${invalidCount} files were skipped because they are not PDFs.`,
+        variant: "destructive",
+      });
+    }
+
+    if (duplicates.length) {
+      toast({
+        title: "Duplicate skipped",
+        description: duplicates.join(", "),
+      });
+    }
+
+    if (validItems.length) {
+      setSelectedFiles((prev) => [...prev, ...validItems]);
+      setCurrentStep(2);
+      toast({
+        title: validItems.length === 1 ? "File added" : `${validItems.length} files added`,
+        description:
+          validItems.length === 1
+            ? `${validItems[0].file.name} (${(validItems[0].file.size / 1024 / 1024).toFixed(2)} MB) — click Process Documents to start.`
+            : "All files queued. Click Process Documents to begin the batch.",
+      });
+    }
+  };
+
+  const updateFileTechnicalOrder = (clientId: string, isTechnicalOrder: boolean) => {
+    setSelectedFiles((prev) =>
+      prev.map((item) =>
+        item.clientId === clientId
+          ? {
+              ...item,
+              isTechnicalOrder,
+            }
+          : item,
+      ),
+    );
+  };
+
+  const removeFile = (clientId: string) => {
+    const file = selectedFiles.find((item) => item.clientId === clientId);
+    if (!file) return;
+
+    if (file.status !== "pending") {
+      toast({
+        title: "Cannot remove during processing",
+        description: "Please wait until this document finishes processing.",
         variant: "destructive",
       });
       return;
     }
 
-    setUploadedFile(file);
-    // Skip preview, go directly to processing step
-    setCurrentStep(2);
-    toast({
-      title: "File uploaded successfully",
-      description: `${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`,
-    });
+    setSelectedFiles((prev) => prev.filter((item) => item.clientId !== clientId));
   };
 
   const handleCreateFolder = () => {
@@ -149,27 +263,108 @@ export default function Upload() {
 
   // Removed TOC confirmation - direct processing
 
-  const handleStartProcessing = () => {
-    if (!uploadedFile || !selectedFolder) {
+  const handleStartProcessing = async () => {
+    if (!selectedFiles.length || !selectedFolder) {
       toast({
         title: "Missing information",
-        description: "Please complete all required fields",
+        description: "Please select at least one PDF and a destination folder.",
         variant: "destructive",
       });
       return;
     }
 
-    uploadMutation.mutate({
-      file: uploadedFile,
-      folderId: selectedFolder,
-    });
+    if (pendingCount === 0) {
+      toast({
+        title: "Nothing to process",
+        description: "All selected files have already been processed.",
+      });
+      return;
+    }
+
+    const pendingToProcess = selectedFiles.filter((item) => item.status === "pending").length;
+    if (pendingToProcess === 0) {
+      toast({
+        title: "Nothing to process",
+        description: "All selected files have already been processed.",
+      });
+      return;
+    }
+
+    setCurrentStep(3);
+    setIsProcessingBatch(true);
+
+    for (const fileItem of selectedFiles) {
+      if (fileItem.status !== "pending") {
+        continue;
+      }
+
+      setSelectedFiles((prev) =>
+        prev.map((item) =>
+          item.clientId === fileItem.clientId
+            ? { ...item, status: "uploading", progress: 0, message: "Uploading to server..." }
+            : item,
+        ),
+      );
+
+      try {
+        const data = await uploadMutation.mutateAsync({
+          file: fileItem.file,
+          folderId: selectedFolder,
+          isTechnicalOrder: fileItem.isTechnicalOrder,
+        });
+
+        const documentId = data.documentId as string;
+
+        toast({
+          title: "Upload successful",
+          description: `${fileItem.file.name} queued for processing`,
+        });
+
+        setSelectedFiles((prev) =>
+          prev.map((item) =>
+            item.clientId === fileItem.clientId
+              ? {
+                  ...item,
+                  status: "processing",
+                  docId: documentId,
+                  progress: 10,
+                  message: "Starting PDF processing...",
+                }
+              : item,
+          ),
+        );
+
+        startProgressPolling(documentId, fileItem.clientId, fileItem.file.name);
+      } catch (error) {
+        console.error("Upload error", error);
+        setSelectedFiles((prev) =>
+          prev.map((item) =>
+            item.clientId === fileItem.clientId
+              ? {
+                  ...item,
+                  status: "error",
+                  message: error instanceof Error ? error.message : "Upload failed",
+                }
+              : item,
+          ),
+        );
+
+        toast({
+          title: "Upload failed",
+          description: `${fileItem.file.name} could not be processed`,
+          variant: "destructive",
+        });
+      }
+    }
+
+    setIsProcessingBatch(false);
   };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
-    if (files[0]) {
-      handleFileUpload(files[0]);
+    if (files.length) {
+      handleFilesUpload(files);
     }
   };
 
@@ -177,9 +372,20 @@ export default function Upload() {
     e.preventDefault();
   };
 
+  const totalSelected = selectedFiles.length;
+  const completedCount = selectedFiles.filter((item) => item.status === "completed").length;
+  const anyProcessing = selectedFiles.some((item) => item.status === "uploading" || item.status === "processing");
+  const hasStartedProcessing = selectedFiles.some((item) => item.status !== "pending");
+  const allCompleted = totalSelected > 0 && completedCount === totalSelected;
+  const pendingCount = selectedFiles.filter((item) => item.status === "pending").length;
+  const workRemainingCount = selectedFiles.filter((item) =>
+    item.status === "pending" || item.status === "uploading" || item.status === "processing",
+  ).length;
+
   return (
-    <div className="space-y-6">
-      <ProgressIndicator currentStep={currentStep} totalSteps={3} />
+    <SidebarLayout title="Upload AFIs">
+      <div className="space-y-6">
+        <ProgressIndicator currentStep={currentStep} totalSteps={3} />
 
       {/* Step 1: Folder Selection */}
       <Card className="border-border bg-card">
@@ -254,31 +460,92 @@ export default function Upload() {
           >
             <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
             <div className="space-y-2">
-              <p className="text-lg font-medium text-foreground">Upload AFI PDF here</p>
-              <p className="text-sm text-muted-foreground">Drag and drop or click to select file</p>
+              <p className="text-lg font-medium text-foreground">Upload AFI PDFs here</p>
+              <p className="text-sm text-muted-foreground">Drag and drop or click to select one or more files</p>
             </div>
             <input
               id="file-upload"
               type="file"
               accept=".pdf"
+              multiple
               className="hidden"
               onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) handleFileUpload(file);
+                const files = e.target.files;
+                if (files?.length) {
+                  handleFilesUpload(files);
+                  e.target.value = "";
+                }
               }}
               data-testid="file-input"
             />
           </div>
           
-          {uploadedFile && (
-            <div className="mt-4 p-3 bg-muted/50 rounded-lg">
-              <div className="flex items-center gap-2">
-                <FileText className="h-5 w-5 text-primary" />
-                <span className="font-medium">{uploadedFile.name}</span>
-                <Badge variant="outline">
-                  {(uploadedFile.size / 1024 / 1024).toFixed(2)} MB
-                </Badge>
-              </div>
+          {selectedFiles.length > 0 && (
+            <div className="mt-4 space-y-3">
+              {selectedFiles.map((item) => (
+                <div key={item.clientId} className="p-4 bg-muted/40 rounded-lg border border-border/60 space-y-2">
+                  <div className="flex items-start gap-3">
+                    <FileText className="h-5 w-5 text-primary mt-0.5" />
+                    <div className="flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium break-all">{item.file.name}</span>
+                        <Badge variant="outline">
+                          {(item.file.size / 1024 / 1024).toFixed(2)} MB
+                        </Badge>
+                        <Badge
+                          variant="secondary"
+                          className={`${statusStyles[item.status].className} border-none`}
+                        >
+                          {statusStyles[item.status].label}
+                        </Badge>
+                      </div>
+                      {item.status === "pending" && (
+                        <p className="text-xs text-muted-foreground mt-1">{item.message}</p>
+                      )}
+                    </div>
+                    {item.status === "pending" && (
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => removeFile(item.clientId)}
+                        aria-label={`Remove ${item.file.name}`}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        id={`to-toggle-${item.clientId}`}
+                        checked={item.isTechnicalOrder}
+                        onCheckedChange={(checked) => updateFileTechnicalOrder(item.clientId, checked)}
+                        disabled={item.status !== "pending"}
+                      />
+                      <Label htmlFor={`to-toggle-${item.clientId}`} className="text-sm">
+                        Mark as Technical Order (TO)
+                      </Label>
+                    </div>
+                    {item.status !== "pending" && (
+                      <p className="text-xs text-muted-foreground">
+                        Technical Order flag locked while processing
+                      </p>
+                    )}
+                  </div>
+                  {item.status !== "pending" && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs text-muted-foreground">
+                        <span className="truncate pr-2">{item.message}</span>
+                        <span>{Math.round(item.progress)}%</span>
+                      </div>
+                      <Progress value={item.progress} className="w-full" />
+                    </div>
+                  )}
+                  {item.status === "error" && (
+                    <p className="text-xs text-destructive">{item.message || "Attempt failed. Try again later."}</p>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </CardContent>
@@ -290,66 +557,79 @@ export default function Upload() {
           <CardHeader>
             <CardTitle className="text-foreground flex items-center gap-2">
               <Cog className="h-5 w-5" />
-              Step 3: Process Document
+              Step 3: Process Documents
             </CardTitle>
             <CardDescription>
-              Process PDF with AFI parser and generate embeddings for semantic search
+              Process PDFs with the AFI parser and generate embeddings for semantic search
             </CardDescription>
           </CardHeader>
           <CardContent>
             <div className="space-y-4">
               <div className="p-4 bg-muted/50 rounded-lg">
                 <h4 className="font-medium mb-2">Processing Summary</h4>
-                <div className="space-y-1 text-sm">
-                  <p><strong>File:</strong> {uploadedFile?.name}</p>
-                  <p><strong>Folder:</strong> {folders.find(f => f.id === selectedFolder)?.name}</p>
-                  <p><strong>Processing:</strong> PDF → Python Parser → CSV → Embeddings → Replit DB</p>
-                  <p className="text-xs text-muted-foreground">AFI number will be automatically extracted from the document</p>
-                </div>
-              </div>
-
-              {(uploadMutation.isPending || processingProgress > 0) && processingProgress < 100 && (
-                <div className="space-y-2">
-                  <div className="flex justify-between text-sm">
-                    <span>{processingMessage || "Processing with Python script..."}</span>
-                    <span>{processingProgress}%</span>
-                  </div>
-                  <Progress value={processingProgress} className="w-full" />
-                  <p className="text-xs text-muted-foreground">
-                    Real-time OpenAI embedding progress - {processingProgress < 50 ? "Parsing PDF..." : processingProgress < 90 ? "Generating embeddings..." : "Finalizing..."}
+                <div className="grid gap-1 text-sm">
+                  <p>
+                    <strong>Destination:</strong> {folders.find((f) => f.id === selectedFolder)?.name ?? "Select a folder"}
+                  </p>
+                  <p>
+                    <strong>Files selected:</strong> {totalSelected}
+                  </p>
+                  <p>
+                    <strong>Completed:</strong> {completedCount} / {totalSelected}
+                  </p>
+                  <p>
+                    <strong>Pipeline:</strong> PDF → Python Parser → CSV → Embeddings → Vector Store
                   </p>
                 </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  AFI numbers and metadata are extracted automatically from each original file name for consistent search results.
+                </p>
+              </div>
+              {hasStartedProcessing && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    {anyProcessing || isProcessingBatch ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle className="h-4 w-4 text-green-500" />
+                    )}
+                    <span>
+                      {allCompleted
+                        ? "All documents processed and searchable"
+                        : `${completedCount} of ${totalSelected} documents processed`}
+                    </span>
+                  </div>
+                  {anyProcessing && (
+                    <p className="text-xs text-muted-foreground">
+                      Hold tight—each PDF is parsed, chunked, and embedded in sequence for consistent metadata.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {!hasStartedProcessing && pendingCount > 0 && (
+                <p className="text-sm text-muted-foreground">
+                  Click <strong>Process Documents</strong> to upload and index the files listed above.
+                </p>
               )}
 
               <Button
                 className="w-full"
                 onClick={handleStartProcessing}
-                disabled={!selectedFolder || !uploadedFile || uploadMutation.isPending || (processingProgress > 0 && processingProgress < 100)}
+                disabled={!selectedFolder || pendingCount === 0 || isProcessingBatch || anyProcessing}
                 data-testid="start-processing-button"
               >
-                {uploadMutation.isPending || (processingProgress > 0 && processingProgress < 100) ? 
-                  `Processing... ${processingProgress}%` : "Process Document"}
+                {isProcessingBatch || anyProcessing
+                  ? `Processing ${workRemainingCount} remaining...`
+                  : pendingCount === 0
+                    ? "All documents processed"
+                    : `Process ${pendingCount} ${pendingCount === 1 ? "Document" : "Documents"}`}
               </Button>
               
-              {(uploadMutation.isPending || processingProgress > 0) && processingProgress < 100 && (
-                <div className="text-center text-sm text-muted-foreground space-y-1">
-                  <p className="flex items-center justify-center gap-2">
-                    {processingProgress >= 10 ? "✓" : "⏳"} 
-                    Running AFI parser script
-                  </p>
-                  <p className="flex items-center justify-center gap-2">
-                    {processingProgress >= 50 ? "✓" : processingProgress >= 10 ? "⏳" : "○"} 
-                    Extracting numbered paragraphs
-                  </p>
-                  <p className="flex items-center justify-center gap-2">
-                    {processingProgress >= 90 ? "✓" : processingProgress >= 50 ? "⏳" : "○"} 
-                    Generating OpenAI embeddings: {processingProgress >= 50 ? `${Math.round((processingProgress - 50) / 40 * 100)}% complete` : "Waiting..."}
-                  </p>
-                  <p className="flex items-center justify-center gap-2">
-                    {processingProgress >= 95 ? "✓" : processingProgress >= 90 ? "⏳" : "○"} 
-                    Storing in ChromaDB collection
-                  </p>
-                </div>
+              {selectedFiles.some((item) => item.status === "error") && (
+                <p className="text-sm text-center text-destructive">
+                  One or more files failed to upload. Remove them or retry after checking the logs.
+                </p>
               )}
             </div>
           </CardContent>
@@ -357,7 +637,7 @@ export default function Upload() {
       )}
 
       {/* Success Message */}
-      {currentStep >= 3 && !uploadMutation.isPending && (
+      {currentStep >= 3 && allCompleted && (
         <Card className="border-green-200 bg-green-50 dark:border-green-800 dark:bg-green-950">
           <CardContent className="pt-6">
             <div className="flex items-center gap-3">
@@ -365,7 +645,7 @@ export default function Upload() {
               <div>
                 <h3 className="font-semibold text-green-800 dark:text-green-200">Processing Complete!</h3>
                 <p className="text-sm text-green-600 dark:text-green-400">
-                  Your AFI document has been processed and is now available for semantic search.
+                  All selected AFI documents are processed and ready for semantic search.
                 </p>
               </div>
             </div>
@@ -376,10 +656,22 @@ export default function Upload() {
               <Button variant="outline" asChild>
                 <Link href="/library">View Library</Link>
               </Button>
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  Object.values(pollIntervals.current).forEach(clearInterval);
+                  pollIntervals.current = {};
+                  setSelectedFiles([]);
+                  setCurrentStep(1);
+                }}
+              >
+                Start another batch
+              </Button>
             </div>
           </CardContent>
         </Card>
       )}
     </div>
+    </SidebarLayout>
   );
 }

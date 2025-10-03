@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { Database, Cog, FolderOpen, Trash2 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
-import { type Folder } from "@shared/schema";
+import { type Folder } from "@/types/library";
 
 export default function Settings() {
   const { toast } = useToast();

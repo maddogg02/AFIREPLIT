@@ -110,6 +110,7 @@ class RAGChatSystem:
         model: str,
         sources: List[Dict[str, Any]],
         knowledge_only: bool,
+        procedural_mode: bool = False,
     ) -> tuple[str, str]:
         return self.response_generator.generate(
             user_query=user_query,
@@ -117,6 +118,7 @@ class RAGChatSystem:
             model=model,
             sources=sources,
             knowledge_only=knowledge_only,
+            procedural_mode=procedural_mode,
         )
 
     def _prepare_filter_metadata(
@@ -217,6 +219,33 @@ class RAGChatSystem:
 
         if not self.silent:
             print(f"✅ Retrieved {len(search_results)} candidates in {retrieval_duration_ms} ms")
+
+        # Detect procedural intent and adjust retrieval depth if needed
+        procedural_mode = self.retrieval_engine.detect_procedural_intent(user_query, search_results)
+        if procedural_mode:
+            apply_filter = False
+
+        if procedural_mode and n_results < 8:
+            if not self.silent:
+                print(f"🔧 Procedural mode detected; expanding retrieval to ≥8 results...")
+            # Re-retrieve with higher n_results for exhaustive step coverage
+            retrieval_start = perf_counter()
+            search_results = self.retrieve_docs(
+                user_query=user_query,
+                n_results=max(8, n_results),
+                filter_metadata=filter_metadata or None,
+                min_score=effective_min_score,
+            )
+            retrieval_duration_ms = round((perf_counter() - retrieval_start) * 1000, 2)
+            if not self.silent:
+                print(f"✅ Re-retrieved {len(search_results)} candidates in {retrieval_duration_ms} ms")
+
+        if procedural_mode and self.config.neighbor_hops > 0:
+            expanded_results = self.retrieval_engine.expand_with_neighbors(search_results, hops=self.config.neighbor_hops)
+            if expanded_results:
+                if not self.silent:
+                    print(f"🔗 Neighbor expansion added {len(expanded_results) - len(search_results)} paragraphs")
+                search_results = expanded_results
 
         filtered_results = search_results
         filter_duration_ms = None
@@ -319,6 +348,7 @@ class RAGChatSystem:
             model=model,
             sources=sources,
             knowledge_only=False,
+            procedural_mode=procedural_mode,
         )
         generation_duration_ms = round((perf_counter() - generation_start) * 1000, 2)
         total_duration_ms = round((perf_counter() - overall_start) * 1000, 2)
@@ -362,7 +392,7 @@ def main() -> None:
     config = RAGConfig(
         chroma_dir=Path(args.chroma_dir),
         min_similarity_score=args.min_score or DEFAULT_MIN_SIMILARITY,
-    hybrid_mode=args.hybrid,
+        hybrid_mode=args.hybrid,
         silent=args.silent,
         use_filter=not args.no_filter,
         default_max_tokens=args.max_tokens or DEFAULT_MAX_COMPLETION_TOKENS,

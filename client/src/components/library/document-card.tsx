@@ -4,12 +4,15 @@ import { Progress } from "@/components/ui/progress";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { MessageCircle, MoreVertical, FileText, Clock, Trash2 } from "lucide-react";
-import { type Document } from "@shared/schema";
+import { type Document } from "@/types/library";
 import { Link } from "wouter";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useMemo, useState } from "react";
+import { getDocumentStatusBadgeProps } from "@/lib/document-status";
+import { cn } from "@/lib/utils";
+import { DocumentActions } from "@/components/library/document-actions";
 
 interface DocumentCardProps {
   document: Document;
@@ -57,19 +60,6 @@ export default function DocumentCard({ document }: DocumentCardProps) {
     return document.filename.replace(/\.[^./\\]+$/, "");
   }, [document.filename]);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case "complete":
-        return "bg-green-100 text-green-800";
-      case "processing":
-        return "bg-yellow-100 text-yellow-800";
-      case "error":
-        return "bg-red-100 text-red-800";
-      default:
-        return "bg-gray-100 text-gray-800";
-    }
-  };
-
   const formatDate = (date: Date) => {
     return new Date(date).toLocaleDateString();
   };
@@ -77,6 +67,9 @@ export default function DocumentCard({ document }: DocumentCardProps) {
   const formatFileSize = (bytes: number) => {
     return (bytes / 1024 / 1024).toFixed(2) + " MB";
   };
+
+  const statusMeta = getDocumentStatusBadgeProps(document.status);
+  const StatusIcon = statusMeta.icon;
 
   return (
     <div 
@@ -91,8 +84,9 @@ export default function DocumentCard({ document }: DocumentCardProps) {
             <p className="text-sm text-muted-foreground">{document.afiNumber}</p>
           </div>
         </div>
-        <Badge className={getStatusColor(document.status)}>
-          {document.status.charAt(0).toUpperCase() + document.status.slice(1)}
+        <Badge className={cn("flex items-center gap-1", statusMeta.badgeClassName)}>
+          {StatusIcon ? <StatusIcon className="h-3 w-3" /> : null}
+          {statusMeta.label}
         </Badge>
       </div>
 
@@ -130,15 +124,26 @@ export default function DocumentCard({ document }: DocumentCardProps) {
 
       <div className="flex gap-2 mt-4">
         {document.status === "complete" ? (
-          <Link href="/chat" className="flex-1">
-            <Button 
-              className="w-full"
-              data-testid={`chat-button-${document.id}`}
-            >
-              <MessageCircle className="h-4 w-4 mr-1" />
-              Chat
-            </Button>
-          </Link>
+          <>
+            <Link href="/chat" className="flex-1">
+              <Button 
+                className="w-full"
+                data-testid={`chat-button-${document.id}`}
+              >
+                <MessageCircle className="h-4 w-4 mr-1" />
+                Chat
+              </Button>
+            </Link>
+            <DocumentActions
+              document={document}
+              size="default"
+              showLabels
+              testIds={{
+                pdf: `view-button-${document.id}`,
+                csv: `view-csv-button-${document.id}`,
+              }}
+            />
+          </>
         ) : (
           <Button 
             className="flex-1" 

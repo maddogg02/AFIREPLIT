@@ -19,7 +19,16 @@ import {
   type InsertChatMessage,
 } from "@shared/schema";
 import { db } from "./db";
-import { eq, and, desc, ilike, sql } from "drizzle-orm";
+import { eq, and, desc, ilike, SQL } from "drizzle-orm";
+
+export type DocumentFilters = {
+  folderId?: string;
+  search?: string;
+  status?: Document["status"];
+  afiSeries?: string;
+  limit?: number;
+  offset?: number;
+};
 
 export interface IStorage {
   // Users
@@ -31,10 +40,11 @@ export interface IStorage {
   getFolders(): Promise<Folder[]>;
   getFolder(id: string): Promise<Folder | undefined>;
   createFolder(folder: InsertFolder): Promise<Folder>;
+  updateFolder(id: string, updates: Partial<Pick<Folder, "name" | "description">>): Promise<Folder>;
   deleteFolder(id: string): Promise<void>;
   
   // Documents
-  getDocuments(folderId?: string): Promise<Document[]>;
+  getDocuments(filters?: DocumentFilters): Promise<Document[]>;
   getDocument(id: string): Promise<Document | undefined>;
   createDocument(document: InsertDocument): Promise<Document>;
   updateDocument(id: string, updates: Partial<Document>): Promise<Document>;
@@ -89,18 +99,63 @@ export class DatabaseStorage implements IStorage {
     return created;
   }
 
+  async updateFolder(id: string, updates: Partial<Pick<Folder, "name" | "description">>): Promise<Folder> {
+    const [updated] = await db
+      .update(folders)
+      .set(updates)
+      .where(eq(folders.id, id))
+      .returning();
+    return updated;
+  }
+
   async deleteFolder(id: string): Promise<void> {
     await db.delete(folders).where(eq(folders.id, id));
   }
 
   // Documents
-  async getDocuments(folderId?: string): Promise<Document[]> {
+  async getDocuments(filters: DocumentFilters = {}): Promise<Document[]> {
+    const { folderId, search, status, afiSeries, limit, offset } = filters;
+
+  let query = db.select().from(documents).$dynamic();
+  const conditions: SQL<unknown>[] = [];
+
     if (folderId) {
-      return await db.select().from(documents)
-        .where(eq(documents.folderId, folderId))
-        .orderBy(desc(documents.uploadDate));
+      conditions.push(eq(documents.folderId, folderId));
     }
-    return await db.select().from(documents).orderBy(desc(documents.uploadDate));
+
+    if (status) {
+      conditions.push(eq(documents.status, status));
+    }
+
+    if (search) {
+      conditions.push(ilike(documents.filename, `%${search}%`));
+    }
+
+    if (afiSeries) {
+      if (/^\d{2}$/.test(afiSeries)) {
+        conditions.push(ilike(documents.afiNumber, `%${afiSeries}-%`));
+      } else {
+        conditions.push(ilike(documents.afiNumber, `%${afiSeries}%`));
+      }
+    }
+
+    if (conditions.length === 1) {
+      query = query.where(conditions[0]);
+    } else if (conditions.length > 1) {
+      query = query.where(and(...conditions));
+    }
+
+    query = query.orderBy(desc(documents.uploadDate));
+
+    if (typeof limit === "number") {
+      query = query.limit(limit);
+    }
+
+    if (typeof offset === "number") {
+      query = query.offset(offset);
+    }
+
+    return await query;
   }
 
   async getDocument(id: string): Promise<Document | undefined> {

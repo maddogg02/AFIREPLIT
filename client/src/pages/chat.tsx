@@ -9,7 +9,9 @@ import { useToast } from "@/hooks/use-toast";
 import { Search, MessageCircle, Send, Mic, Plus, Cpu } from "lucide-react";
 import Message from "@/components/chat/message";
 import { apiRequest } from "@/lib/queryClient";
-import { type Folder, type ChatSession, type ChatMessage, type Document } from "@shared/schema";
+import { type Folder, type Document } from "@/types/library";
+import { type ChatSession, type ChatMessage } from "@shared/schema";
+import { SidebarLayout } from "@/components/layout/sidebar-layout";
 
 export default function Chat() {
   const { toast } = useToast();
@@ -109,8 +111,8 @@ export default function Chat() {
   const afiNumbers = Array.from(new Set(documents.map(doc => doc.afiNumber).filter(Boolean))).sort();
 
   return (
-    <div className="space-y-6">
-      {/* Search Scope Configuration */}
+    <SidebarLayout title="AI Assistant">
+      <div className="space-y-6">{/* Search Scope Configuration */}
       <Card className="border-border bg-card">
         <CardHeader>
           <CardTitle className="text-foreground flex items-center gap-2">
@@ -314,5 +316,6 @@ export default function Chat() {
         </CardContent>
       </Card>
     </div>
+    </SidebarLayout>
   );
 }

@@ -1,11 +1,11 @@
 defaults:
-  min_similarity: 0.05
+  min_similarity: 0.12  # Raised from 0.05 to reduce noise
   context_token_multiplier: 4
   default_max_tokens: 1500
   embedding_model: text-embedding-3-small
   context_truncation_notice: "\n[...truncated for length...]"
   embedding_cache_size: 128
-  filter_min_similarity: 0.05
+  filter_min_similarity: 0.12  # Match min_similarity
 
 retrieval:
   important_keywords: []  # Optional: add domain-specific keywords to prioritize passages.
@@ -17,6 +17,32 @@ retrieval:
     - "^appendix [a-z]"
     - "^\\d+\\.\\s*[a-z\\s]+\\."
   query_tweaks: []  # Optional: define trigger/addition pairs to auto-expand queries.
+  top_k: 8  # Base number of hits to keep before expansion
+  neighbor_hops: 2  # Fetch +/-2 adjacent paragraphs around each hit for richer procedures
+  neighbor_fetch_limit: 200  # Maximum docs to pull per AFI/chapter when expanding neighbors
+  group_by_prefix: true  # Keep related paragraph sequences together when assembling context
+
+filters:
+  denylist_sections:
+    - "^\\s*table\\s+of\\s+contents\\b"
+    - "^\\s*list\\s+of\\s+figures\\b"
+    - "^\\s*record\\s+of\\s+changes\\b"
+    - "^\\s*glossary\\b"
+    - "^\\s*acronyms?\\b"
+    - "^\\s*abbreviations\\b"
+    - "^\\s*index\\b"
+    - "^\\s*references?\\b"
+  case_insensitive: true
+  multiline: true
+
+assembly:
+  context_token_cap: 6000  # Hard cap for assembled context to prevent token overflow
+  trim_strategy: "middle"  # Keep head and tail of sequences
+
+citations:
+  per_item_required: true  # Every bullet must carry a paragraph reference
+  min_items: 1
+  max_items: 999
 
 prompts:
   knowledge_only:
@@ -73,3 +99,40 @@ prompts:
       - {{ section }}
       {% endfor %}
       {{ additional_notes }}
+  procedural:
+    system: |-
+      You are an AFI/DAFI procedures expert. When the user asks for steps, processes, or "how to" guidance, provide exhaustive, numbered step-by-step instructions directly from the retrieved context.
+      
+      CRITICAL INSTRUCTIONS:
+      1. Present each numbered paragraph or step individually in the "Procedural Checklist", preserving the exact numbering sequence from the source (e.g., 8.9.2.1, 8.9.2.1.1, etc.)
+      2. Include ALL related steps from adjacent sections that provide necessary context or continuation
+      3. Always cite the chapter/paragraph reference with each step
+      4. Capture unit supplements (e.g., *_SUP) separately under "Unit Supplement Notes" while preserving their numbering
+      5. Do NOT summarize or skip steps—reproduce the full procedural sequence
+      6. If multiple documents are retrieved, merge relevant sections into one ordered sequence grouped by source
+      7. For policy text, provide a detailed clause-by-clause breakdown instead of a summary
+      8. If a step has no paragraph ID in the source, do NOT include it
+    user: |-
+      Question:
+      {{ query }}
+
+      Sources:
+      {{ sources_summary }}
+
+      Context:
+      {{ context or "(No AFI/DAFI passages were retrieved.)" }}
+
+      FIRST: Print "**Sources used:** [comma-separated list of paragraph IDs you will cite]"
+      
+      THEN format the reply in Markdown with:
+      {% for section in sections -%}
+      - {{ section }}
+      {% endfor %}
+      
+    CRITICAL CITATION RULES:
+    - Under "Procedural Checklist", list EVERY numbered step found in the context in original order
+    - Under "Unit Supplement Notes", include every numbered supplemental requirement retrieved
+    - Every step MUST start with its paragraph ID in bold (e.g., **8.9.2.1**)
+    - Preserve original paragraph numbers and sequence
+    - Include full text for each step, not summaries
+    - If a step lacks a paragraph ID, omit it entirely

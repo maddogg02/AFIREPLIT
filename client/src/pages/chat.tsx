@@ -1,321 +1,338 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { Search, MessageCircle, Send, Mic, Plus, Cpu } from "lucide-react";
-import Message from "@/components/chat/message";
+import { Search, Loader2 } from "lucide-react";
 import { apiRequest } from "@/lib/queryClient";
-import { type Folder, type Document } from "@/types/library";
-import { type ChatSession, type ChatMessage } from "@shared/schema";
 import { SidebarLayout } from "@/components/layout/sidebar-layout";
+import { type Folder, type Document } from "@/types/library";
+
+type SearchResult = {
+  id: string;
+  text: string;
+  metadata: {
+    paragraph?: string;
+    afi_number?: string;
+    chapter?: string;
+    doc_id?: string;
+    compliance_tier?: string;
+    folder?: string;
+  };
+  similarity_score: number;
+};
+
+type SearchResponse = {
+  success: boolean;
+  query: string;
+  total_matches: number;
+  results: SearchResult[];
+  error?: string;
+};
+
+type ScopeSummary = {
+  folderLabel: string;
+  afiLabel: string | null;
+};
 
 export default function Chat() {
   const { toast } = useToast();
-  const queryClient = useQueryClient();
-  
+  const [query, setQuery] = useState("");
   const [scopeFolder, setScopeFolder] = useState("all");
   const [scopeAfi, setScopeAfi] = useState("all");
-  const [messageInput, setMessageInput] = useState("");
-  const [currentSession, setCurrentSession] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState("gpt-5");
+  const [lastQuery, setLastQuery] = useState<string | null>(null);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [lastScope, setLastScope] = useState<ScopeSummary | null>(null);
+  const [smartMode, setSmartMode] = useState<boolean>(false);
 
-  // Fetch folders
   const { data: folders = [] } = useQuery<Folder[]>({
     queryKey: ["/api/folders"],
   });
-
-  // Fetch documents to get unique AFI numbers
   const { data: documents = [] } = useQuery<Document[]>({
     queryKey: ["/api/documents"],
   });
 
-  // Fetch chat sessions
-  const { data: sessions = [] } = useQuery<ChatSession[]>({
-    queryKey: ["/api/chat/sessions"],
-  });
+  const selectedFolder = scopeFolder === "all" ? null : folders.find((folder) => folder.id === scopeFolder);
 
-  // Fetch messages for current session
-  const { data: messages = [] } = useQuery<ChatMessage[]>({
-    queryKey: ["/api/chat/sessions", currentSession, "messages"],
-    enabled: !!currentSession,
-  });
+  // Filter documents by selected folder
+  const filteredDocuments = scopeFolder === "all" 
+    ? documents 
+    : documents.filter((doc) => doc.folderId === scopeFolder);
 
-  // Create new chat session
-  const createSessionMutation = useMutation({
-    mutationFn: async () => {
-      const response = await apiRequest("POST", "/api/chat/sessions", {
-        scopeFolder: scopeFolder === "all" ? null : scopeFolder,
-        scopeAfi: scopeAfi === "all" ? null : scopeAfi,
-        title: "New Chat Session",
-      });
-      return response.json();
-    },
-    onSuccess: (newSession) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/chat/sessions"] });
-      setCurrentSession(newSession.id);
-    },
-  });
+  // Only show AFIs that are in the selected folder (or all if no folder selected)
+  const afiNumbers = Array.from(
+    new Set(
+      filteredDocuments
+        .map((doc) => doc.afiNumber?.trim())
+        .filter((afi): afi is string => Boolean(afi)),
+    ),
+  ).sort();
 
-  // Send message mutation
-  const sendMessageMutation = useMutation({
-    mutationFn: async ({ sessionId, content, model }: { sessionId: string; content: string; model: string }) => {
-      // Send user message - backend automatically generates ChromaDB-powered AI response
-      const response = await apiRequest("POST", `/api/chat/sessions/${sessionId}/messages`, {
-        role: "user",
-        content,
-        model,
-      });
-      return response.json();
+  const searchMutation = useMutation<
+    SearchResponse,
+    unknown,
+    { query: string; filters: Record<string, string>; scopeSummary: ScopeSummary; smart: boolean }
+  >({
+    mutationFn: async ({ query: searchText, filters, smart }) => {
+      const payload: Record<string, unknown> = {
+        query: searchText,
+        n_results: 60,
+      };
+
+      if (Object.keys(filters).length > 0) {
+        payload.filters = filters;
+      }
+
+      // Route to smart endpoint when enabled
+      const endpoint = smart ? "/api/search/smart" : "/api/search";
+      const response = await apiRequest("POST", endpoint, payload);
+      return response.json() as Promise<SearchResponse>;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/chat/sessions", currentSession, "messages"] });
-      setMessageInput("");
+    onSuccess: (data, variables) => {
+      console.log("🔍 Search response:", data);
+      
+      if (!data.success) {
+        toast({
+          title: "Search failed",
+          description: data.error || "Unable to complete search.",
+          variant: "destructive",
+        });
+        setResults([]);
+        return;
+      }
+
+      console.log(`✅ Received ${data.results.length} results`);
+      setResults(data.results);
+      setLastQuery(data.query);
+      setLastScope(variables.scopeSummary);
     },
-    onError: () => {
+    onError: (error: unknown) => {
+      console.error(error);
       toast({
-        title: "Error",
-        description: "Failed to send message",
+        title: "Search failed",
+        description: "Something went wrong while searching. Try again in a moment.",
         variant: "destructive",
       });
     },
   });
 
-  const handleSendMessage = () => {
-    if (!messageInput.trim()) return;
-
-    if (!currentSession) {
-      // Create new session first
-      createSessionMutation.mutate();
+  const handleSearch = () => {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      toast({
+        title: "Enter a question",
+        description: "Ask for an AFI topic, e.g. 'male hair requirements' or 'impoundment procedures'.",
+      });
       return;
     }
 
-    sendMessageMutation.mutate({
-      sessionId: currentSession,
-      content: messageInput.trim(),
-      model: selectedModel,
+    const filters: Record<string, string> = {};
+    if (selectedFolder) {
+      filters.folderId = selectedFolder.id;
+      console.log("📁 Filtering by folder:", selectedFolder.name, `(${selectedFolder.id})`);
+    }
+    if (scopeAfi !== "all") {
+      filters.afi_number = scopeAfi;
+      console.log("📄 Filtering by AFI:", scopeAfi);
+    }
+    console.log("🔍 Final filters:", filters);
+
+    const scopeSummary: ScopeSummary = {
+      folderLabel: selectedFolder?.name ?? "All folders",
+      afiLabel: scopeAfi !== "all" ? scopeAfi : null,
+    };
+
+    searchMutation.mutate({
+      query: trimmed,
+      filters,
+      scopeSummary,
+      smart: smartMode,
     });
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      handleSearch();
     }
   };
 
-  // Get unique AFI numbers from actual documents
-  const afiNumbers = Array.from(new Set(documents.map(doc => doc.afiNumber).filter(Boolean))).sort();
-
   return (
-    <SidebarLayout title="AI Assistant">
-      <div className="space-y-6">{/* Search Scope Configuration */}
-      <Card className="border-border bg-card">
-        <CardHeader>
-          <CardTitle className="text-foreground flex items-center gap-2">
-            <Search className="h-5 w-5" />
-            Search Scope
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="space-y-2">
-              <Label>Search Scope</Label>
-              <Select value={scopeFolder} onValueChange={setScopeFolder}>
-                <SelectTrigger data-testid="scope-folder-select">
-                  <SelectValue placeholder="All Folders" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All Folders</SelectItem>
-                  {folders.map((folder) => (
-                    <SelectItem key={folder.id} value={folder.id}>
-                      {folder.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+    <SidebarLayout title="Semantic Search">
+      <div className="space-y-6">
+        <Card className="border-border bg-card">
+          <CardHeader>
+            <CardTitle className="text-foreground flex items-center gap-2">
+              <Search className="h-5 w-5" />
+              Search Scope
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="folder-select">Folder</Label>
+                <Select value={scopeFolder} onValueChange={(value) => {
+                  setScopeFolder(value);
+                  // Reset AFI filter when folder changes since AFI list will change
+                  setScopeAfi("all");
+                }}>
+                  <SelectTrigger id="folder-select" data-testid="scope-folder-select">
+                    <SelectValue placeholder="All Folders" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All folders</SelectItem>
+                    {folders.map((folder) => (
+                      <SelectItem key={folder.id} value={folder.id}>
+                        {folder.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-            <div className="space-y-2">
-              <Label>Specific AFI (Optional)</Label>
-              <Select value={scopeAfi} onValueChange={setScopeAfi}>
-                <SelectTrigger data-testid="scope-afi-select">
-                  <SelectValue placeholder="All AFIs" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All AFIs</SelectItem>
-                  {afiNumbers.map((afi) => (
-                    <SelectItem key={afi} value={afi}>
-                      {afi}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-
-            <div className="space-y-2">
-              <Label className="flex items-center gap-2">
-                <Cpu className="h-4 w-4" />
-                AI Model
-              </Label>
-              <Select value={selectedModel} onValueChange={setSelectedModel}>
-                <SelectTrigger data-testid="model-select">
-                  <SelectValue placeholder="Select Model" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="gpt-5">
-                    <div className="flex flex-col">
-                      <span>GPT-5</span>
-                      <span className="text-xs text-muted-foreground">Latest & Most Advanced</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="gpt-4o">
-                    <div className="flex flex-col">
-                      <span>GPT-4o</span>
-                      <span className="text-xs text-muted-foreground">High Performance</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="gpt-4o-mini">
-                    <div className="flex flex-col">
-                      <span>GPT-4o Mini</span>
-                      <span className="text-xs text-muted-foreground">Fast & Cost-effective</span>
-                    </div>
-                  </SelectItem>
-                  <SelectItem value="gpt-4">
-                    <div className="flex flex-col">
-                      <span>GPT-4</span>
-                      <span className="text-xs text-muted-foreground">Reliable & Capable</span>
-                    </div>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          <div className="mt-4 p-3 bg-muted/50 rounded-lg">
-            <p className="text-sm text-muted-foreground">
-              <strong>Current scope:</strong> {scopeFolder === "all" ? "All Folders" : folders.find(f => f.id === scopeFolder)?.name}
-              {scopeAfi !== "all" && ` - ${scopeAfi}`} 
-              <span className="ml-4"><strong>Model:</strong> {selectedModel}</span>
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Chat Interface */}
-      <Card className="border-border bg-card h-[600px] flex flex-col">
-        <CardHeader className="flex-shrink-0">
-          <CardTitle className="text-foreground flex items-center gap-2">
-            <MessageCircle className="h-5 w-5" />
-            Chat with AFI Assistant
-          </CardTitle>
-        </CardHeader>
-
-        {/* Messages Area */}
-        <CardContent className="flex-1 overflow-y-auto p-4">
-          {!currentSession ? (
-            <div className="text-center py-8">
-              <p className="text-muted-foreground mb-4">
-                Start a conversation by asking a question about AFI procedures.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {messages.length === 0 && (
-                <div className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center flex-shrink-0">
-                    <MessageCircle className="h-4 w-4 text-accent-foreground" />
-                  </div>
-                  <div className="space-y-2 max-w-[80%]">
-                    <div className="p-3 rounded-lg bg-muted">
-                      <p className="text-sm">
-                        Welcome to the AFI Chat Assistant. I can help you find information from Air Force Instructions. 
-                        Please ask me any questions about procedures, requirements, or guidance.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-              
-              {messages.map((message) => (
-                <Message key={message.id} message={message} />
-              ))}
-
-              {sendMessageMutation.isPending && (
-                <div className="flex gap-3">
-                  <div className="w-8 h-8 rounded-full bg-accent flex items-center justify-center flex-shrink-0">
-                    <MessageCircle className="h-4 w-4 text-accent-foreground" />
-                  </div>
-                  <div className="bg-muted p-3 rounded-lg">
-                    <div className="flex gap-1 animate-bounce-dots">
-                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-muted-foreground rounded-full animate-bounce"></div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </CardContent>
-
-        {/* Input Area */}
-        <CardContent className="border-t border-border p-4 flex-shrink-0">
-          <div className="flex gap-2">
-            <div className="flex-1 relative">
-              <Input
-                placeholder="Ask about AFI procedures, requirements, or guidance..."
-                value={messageInput}
-                onChange={(e) => setMessageInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                className="pr-16"
-                data-testid="message-input"
-              />
-              <div className="absolute right-2 top-1/2 transform -translate-y-1/2 text-xs text-muted-foreground">
-                {messageInput.length}/500
+              <div className="space-y-2">
+                <Label htmlFor="afi-select">Specific AFI (optional)</Label>
+                <Select value={scopeAfi} onValueChange={setScopeAfi}>
+                  <SelectTrigger id="afi-select" data-testid="scope-afi-select">
+                    <SelectValue placeholder="All AFIs" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All AFIs</SelectItem>
+                    {afiNumbers.map((afi) => (
+                      <SelectItem key={afi} value={afi}>
+                        {afi}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-            <Button 
-              variant="outline" 
-              size="icon"
-              data-testid="voice-input-button"
-            >
-              <Mic className="h-4 w-4" />
-            </Button>
-            <Button 
-              onClick={handleSendMessage}
-              disabled={!messageInput.trim() || sendMessageMutation.isPending}
-              data-testid="send-message-button"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground mt-2">
-            Press Enter to send, Shift+Enter for new line
-          </p>
-          
-          {/* New Session Button */}
-          <div className="mt-3 pt-3 border-t border-border">
-            <Button 
-              variant="outline" 
-              onClick={() => {
-                setCurrentSession(null);
-                createSessionMutation.mutate();
-              }}
-              disabled={createSessionMutation.isPending}
-              className="w-full"
-              data-testid="new-session-button"
-            >
-              <Plus className="h-4 w-4 mr-2" />
-              {createSessionMutation.isPending ? "Starting New Session..." : "Start New Session"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
+            <p className="text-sm text-muted-foreground">
+              {selectedFolder
+                ? `Limiting results to ${selectedFolder.name}${scopeAfi !== "all" ? ` • AFI ${scopeAfi}` : ""}.`
+                : `Searching all folders${scopeAfi !== "all" ? ` • AFI ${scopeAfi}` : ""}.`}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardHeader>
+            <CardTitle className="text-foreground flex items-center gap-2">
+              <Search className="h-5 w-5" />
+              Search the AFI Library
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex gap-2">
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Example: male hair grooming, impoundment procedures, QA notifications"
+                data-testid="semantic-search-input"
+              />
+              <Button
+                onClick={handleSearch}
+                disabled={searchMutation.isPending}
+                data-testid="semantic-search-button"
+              >
+                {searchMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Search className="h-4 w-4" />
+                )}
+              </Button>
+            </div>
+            <div className="flex items-center gap-3">
+              <Switch id="smart-mode" checked={smartMode} onCheckedChange={(v) => setSmartMode(!!v)} />
+              <Label htmlFor="smart-mode" className="text-sm">Smart mode</Label>
+              <p className="text-xs text-muted-foreground">
+                Uses an LLM to expand scenario-style questions before searching. Turn off for direct keyword queries.
+              </p>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Searches the AFI corpus using semantic embeddings{smartMode ? " with LLM-assisted query expansion" : ""}. Matching paragraphs are returned with subordinate subparagraphs included.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardHeader>
+            <CardTitle className="text-foreground">
+              {lastQuery ? (
+                <span>
+                  Results for <span className="font-semibold">“{lastQuery}”</span> ({results.length} matches)
+                </span>
+              ) : (
+                "No results yet"
+              )}
+            </CardTitle>
+            {lastQuery && lastScope && (
+              <p className="text-xs text-muted-foreground">
+                Scope: {lastScope.folderLabel}
+                {lastScope.afiLabel ? ` • AFI ${lastScope.afiLabel}` : " • All AFIs"}
+              </p>
+            )}
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {searchMutation.isPending && (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Searching…
+              </div>
+            )}
+
+            {!searchMutation.isPending && lastQuery && results.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No matching AFI paragraphs were found. Try a different phrasing or adjust your scope filters.
+              </p>
+            )}
+
+            {results.map((result) => {
+              const metadata = result.metadata || {};
+              const afi = metadata.afi_number || "Unknown AFI";
+              const paragraph = metadata.paragraph || "—";
+              const chapter = metadata.chapter ? `Chapter ${metadata.chapter}` : null;
+              const folderLabel = metadata.folder || null;
+
+              return (
+                <div
+                  key={`${result.id}-${paragraph}`}
+                  className="rounded-lg border border-border bg-muted/40 p-4 space-y-2"
+                >
+                  <div className="text-sm font-medium text-foreground flex flex-wrap items-center gap-2">
+                    <span>{afi}</span>
+                    <span className="text-muted-foreground">•</span>
+                    <span>Paragraph {paragraph}</span>
+                    {chapter && (
+                      <>
+                        <span className="text-muted-foreground">•</span>
+                        <span>{chapter}</span>
+                      </>
+                    )}
+                    {folderLabel && (
+                      <>
+                        <span className="text-muted-foreground">•</span>
+                        <span>{folderLabel}</span>
+                      </>
+                    )}
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      Similarity {(result.similarity_score || 0).toFixed(3)}
+                    </span>
+                  </div>
+                  <p className="text-sm leading-relaxed whitespace-pre-line text-foreground">
+                    {result.text}
+                  </p>
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      </div>
     </SidebarLayout>
   );
 }

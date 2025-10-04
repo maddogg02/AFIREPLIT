@@ -10,7 +10,6 @@ import MasterLibraryNew from "@/pages/master-library-new";
 import Chat from "@/pages/chat";
 import Settings from "@/pages/settings";
 import FolderLibrary from "@/pages/folder-library";
-import Configure from "@/pages/configure";
 
 function Router() {
   return (
@@ -21,9 +20,7 @@ function Router() {
         <Route path="/library" component={Library} />
         <Route path="/master-library" component={MasterLibraryNew} />
   <Route path="/folders/:folderId" component={FolderLibrary} />
-  <Route path="/chat" component={Chat} />
-  <Route path="/configure" component={Configure} />
-        <Route path="/settings" component={Settings} />
+  <Route path="/chat" component={Chat} />        <Route path="/settings" component={Settings} />
         <Route component={NotFound} />
       </Switch>
     </div>

@@ -67,9 +67,7 @@ export function AppSidebar() {
   const mainNavItems = [
     { path: "/upload", label: "Upload AFIs", icon: Upload },
     { path: "/master-library", label: "Master Library", icon: Library },
-    { path: "/chat", label: "AI Assistant", icon: MessageSquare },
-    { path: "/configure", label: "Configure Output", icon: Settings },
-  ];
+    { path: "/chat", label: "AI Assistant", icon: MessageSquare },];
 
   // Fetch folders from API
   const { data: folders = [] } = useQuery<FolderType[]>({

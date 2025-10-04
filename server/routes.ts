@@ -7,9 +7,10 @@ import path from "path";
 import fs from "fs";
 import { PDFProcessor } from "./utils/pdf_processor";
 import { OpenAIService } from "./utils/openai_service";
-import { SemanticSearchService } from "./utils/semantic_search";
+import { SemanticSearchService, type SearchFilters } from "./utils/semantic_search";
 import { RAGChatService } from "./utils/rag_chat";
 import { SupabaseStorageService } from "./utils/supabase_storage";
+import { preprocessQuery, type PreprocessResult } from "./utils/smart_query";
 
 // Configure multer for file uploads
 const upload = multer({
@@ -200,15 +201,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: "folderId is required" });
       }
 
-      const isTechnicalOrder = String(req.body?.isTechnicalOrder ?? "false").toLowerCase() === "true";
-
-  const filenameBase = path.parse(req.file.originalname).name.trim() || req.file.originalname;
-  const normalizedBase = filenameBase.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+      // Auto-detect Technical Order from filename pattern
+      const filenameBase = path.parse(req.file.originalname).name.trim() || req.file.originalname;
+      const normalizedBase = filenameBase.replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+      
+      // Check if filename contains TO pattern (e.g., "TO 1-1-691", "TO-00-20-1", "Technical Order 1-1-691")
+      const toPattern = /(?:^|[\s_-])(T\.?O\.?|TECHNICAL\s+ORDER)[\s_-]*(\d{1,2}-\d{1,3}-\d+)/i;
+      const isTechnicalOrder = toPattern.test(normalizedBase);
+      
       let initialAfiName = normalizedBase;
 
       if (isTechnicalOrder) {
         const stripped = normalizedBase.replace(/^(?:T\.?O\.?|TECHNICAL\s+ORDER)[-_\s]*/i, "").trim();
         initialAfiName = stripped ? `TO ${stripped}` : "TO";
+        console.log(`📋 Technical Order detected: "${req.file.originalname}" → "${initialAfiName}"`);
       }
 
       const documentData = {
@@ -464,16 +470,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Search documents using semantic similarity
   app.post("/api/search", async (req, res) => {
     try {
-      const { query, n_results = 5, filters } = req.body;
-      
-      if (!query || typeof query !== 'string') {
+      const { query, n_results = 60, filters } = req.body as {
+        query?: unknown;
+        n_results?: unknown;
+        filters?: Record<string, unknown> | null;
+      };
+
+      if (!query || typeof query !== "string") {
         return res.status(400).json({ error: "Query is required and must be a string" });
       }
 
+      const cleanedNResults = typeof n_results === "number" && Number.isFinite(n_results) ? n_results : 60;
+      const rawFilters = filters && typeof filters === "object" ? filters : {};
+
+      let folderDocs: Awaited<ReturnType<typeof storage.getDocuments>> | undefined;
+      let folderDocIds: string[] | undefined;
+
+      const folderId = typeof rawFilters.folderId === "string" ? rawFilters.folderId : undefined;
+      const afiNumberFilter = typeof rawFilters.afi_number === "string" && rawFilters.afi_number.trim()
+        ? rawFilters.afi_number.trim()
+        : undefined;
+
+      if (folderId) {
+        folderDocs = await storage.getDocuments({ folderId });
+        folderDocIds = folderDocs.map((doc) => doc.id);
+
+        if (folderDocIds.length === 0) {
+          return res.json({ success: true, query, total_matches: 0, results: [] });
+        }
+      }
+
+      let scopedDocIds: string[] | undefined = folderDocIds;
+      if (folderDocIds && afiNumberFilter && folderDocs) {
+        const normalizedAfi = afiNumberFilter.toLowerCase();
+        scopedDocIds = folderDocs
+          .filter((doc) => (doc.afiNumber || "").toLowerCase() === normalizedAfi)
+          .map((doc) => doc.id);
+
+        if (scopedDocIds.length === 0) {
+          return res.json({ success: true, query, total_matches: 0, results: [] });
+        }
+      }
+
+      const searchFilters: SearchFilters = {
+        afi_number: afiNumberFilter,
+        doc_ids: scopedDocIds,
+      };
+
+      console.log(
+        `🔍 Search request: query="${query}", n_results=${cleanedNResults}, filters=`,
+        searchFilters,
+      );
+
       const searchResults = await SemanticSearchService.searchDocuments(
-        query, 
-        n_results, 
-        filters
+        query,
+        cleanedNResults,
+        searchFilters
+      );
+
+      console.log(
+        `✅ Search completed: ${searchResults.total_matches} matches, success=${searchResults.success}`,
       );
 
       res.json(searchResults);
@@ -486,6 +542,94 @@ export async function registerRoutes(app: Express): Promise<Server> {
         total_matches: 0,
         results: []
       });
+    }
+  });
+
+  // Smart search: adds Stage-1 LLM preprocessing for scenario-style queries
+  app.post("/api/search/smart", async (req, res) => {
+    try {
+      const { query, n_results = 60, filters } = req.body as {
+        query?: unknown;
+        n_results?: unknown;
+        filters?: Record<string, unknown> | null;
+      };
+
+      if (!query || typeof query !== "string") {
+        return res.status(400).json({ error: "Query is required and must be a string" });
+      }
+
+      const cleanedNResults = typeof n_results === "number" && Number.isFinite(n_results) ? n_results : 60;
+      const rawFilters = filters && typeof filters === "object" ? filters : {};
+
+      // Reuse existing folder/afi_number scoping
+      let folderDocs: Awaited<ReturnType<typeof storage.getDocuments>> | undefined;
+      let folderDocIds: string[] | undefined;
+      const folderId = typeof rawFilters.folderId === "string" ? rawFilters.folderId : undefined;
+      const afiNumberFilter = typeof rawFilters.afi_number === "string" && rawFilters.afi_number.trim()
+        ? rawFilters.afi_number.trim()
+        : undefined;
+
+      if (folderId) {
+        folderDocs = await storage.getDocuments({ folderId });
+        folderDocIds = folderDocs.map((doc) => doc.id);
+        if (folderDocIds.length === 0) {
+          return res.json({ success: true, query, total_matches: 0, results: [] });
+        }
+      }
+
+      let scopedDocIds: string[] | undefined = folderDocIds;
+      if (folderDocIds && afiNumberFilter && folderDocs) {
+        const normalizedAfi = afiNumberFilter.toLowerCase();
+        scopedDocIds = folderDocs
+          .filter((doc) => (doc.afiNumber || "").toLowerCase() === normalizedAfi)
+          .map((doc) => doc.id);
+        if (scopedDocIds.length === 0) {
+          return res.json({ success: true, query, total_matches: 0, results: [] });
+        }
+      }
+
+      const searchFilters: SearchFilters = {
+        afi_number: afiNumberFilter,
+        doc_ids: scopedDocIds,
+      };
+
+      // Stage-1 preprocess
+      const stage1: PreprocessResult = await preprocessQuery(query);
+      const subqueries = stage1.queries.slice(0, 6); // safety cap
+
+      console.log(`🧠 Smart search mode=${stage1.mode}, ${subqueries.length} subqueries`);
+
+      // Stage-2: run one or multiple searches and merge results
+      const merged: any[] = [];
+      for (const q of subqueries) {
+        const r = await SemanticSearchService.searchDocuments(q, Math.ceil(cleanedNResults / subqueries.length) || 10, searchFilters);
+        if (r?.results?.length) merged.push(...r.results);
+      }
+
+      // Deduplicate by id and keep best similarity_score
+      const byId = new Map<string, any>();
+      for (const r of merged) {
+        const prev = byId.get(r.id);
+        if (!prev || (typeof r.similarity_score === 'number' && r.similarity_score > (prev.similarity_score || 0))) {
+          byId.set(r.id, r);
+        }
+      }
+
+      // Sort by similarity_score desc
+      const unique = Array.from(byId.values()).sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
+      const limited = unique.slice(0, cleanedNResults);
+
+      res.json({
+        success: true,
+        query,
+        mode: stage1.mode,
+        subqueries,
+        total_matches: limited.length,
+        results: limited,
+      });
+    } catch (error: any) {
+      console.error("Smart search error:", error);
+      res.status(500).json({ success: false, error: "Internal smart search error", results: [] });
     }
   });
 

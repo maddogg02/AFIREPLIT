@@ -15,7 +15,6 @@ import ProgressIndicator from "@/components/upload/progress-indicator";
 import { apiRequest } from "@/lib/queryClient";
 import { type Folder as FolderType } from "@/types/library";
 import { SidebarLayout } from "@/components/layout/sidebar-layout";
-import { Switch } from "@/components/ui/switch";
 
 export default function Upload() {
   const { toast } = useToast();
@@ -28,7 +27,6 @@ export default function Upload() {
     progress: number;
     message: string;
     docId?: string;
-    isTechnicalOrder: boolean;
   };
 
   const [currentStep, setCurrentStep] = useState(1);
@@ -77,11 +75,10 @@ export default function Upload() {
 
   // Upload document mutation
   const uploadMutation = useMutation({
-    mutationFn: async ({ file, folderId, isTechnicalOrder }: { file: File; folderId: string; isTechnicalOrder?: boolean }) => {
+    mutationFn: async ({ file, folderId }: { file: File; folderId: string }) => {
       const formData = new FormData();
       formData.append("pdf", file);
       formData.append("folderId", folderId);
-      formData.append("isTechnicalOrder", isTechnicalOrder ? "true" : "false");
 
       const response = await fetch("/api/documents/upload", {
         method: "POST",
@@ -190,7 +187,6 @@ export default function Upload() {
         status: "pending",
         progress: 0,
         message: "Ready — click Process Documents below to begin",
-        isTechnicalOrder: false,
       });
     });
 
@@ -222,19 +218,6 @@ export default function Upload() {
             : "All files queued. Click Process Documents to begin the batch.",
       });
     }
-  };
-
-  const updateFileTechnicalOrder = (clientId: string, isTechnicalOrder: boolean) => {
-    setSelectedFiles((prev) =>
-      prev.map((item) =>
-        item.clientId === clientId
-          ? {
-              ...item,
-              isTechnicalOrder,
-            }
-          : item,
-      ),
-    );
   };
 
   const removeFile = (clientId: string) => {
@@ -310,7 +293,6 @@ export default function Upload() {
         const data = await uploadMutation.mutateAsync({
           file: fileItem.file,
           folderId: selectedFolder,
-          isTechnicalOrder: fileItem.isTechnicalOrder,
         });
 
         const documentId = data.documentId as string;
@@ -512,24 +494,6 @@ export default function Upload() {
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
-                    )}
-                  </div>
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="flex items-center gap-2">
-                      <Switch
-                        id={`to-toggle-${item.clientId}`}
-                        checked={item.isTechnicalOrder}
-                        onCheckedChange={(checked) => updateFileTechnicalOrder(item.clientId, checked)}
-                        disabled={item.status !== "pending"}
-                      />
-                      <Label htmlFor={`to-toggle-${item.clientId}`} className="text-sm">
-                        Mark as Technical Order (TO)
-                      </Label>
-                    </div>
-                    {item.status !== "pending" && (
-                      <p className="text-xs text-muted-foreground">
-                        Technical Order flag locked while processing
-                      </p>
                     )}
                   </div>
                   {item.status !== "pending" && (
